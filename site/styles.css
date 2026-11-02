@@ -506,3 +506,41 @@ body.dim .lcd-body, body.dim .lcd-title { filter: brightness(.72) saturate(.8); 
 
 .wordmark { white-space: nowrap }
 @media (min-width: 900px) and (min-height: 640px) { .brand { max-width: none } .wordmark.chrome { font-size: clamp(56px, 6.4vw, 96px) } }
+
+/* ---------- right column: every value, ✓ and › line up on the same edge ---------- */
+.mi { padding-right: 12px }
+.mi .rt { flex: none; min-width: 16px; text-align: right; font-size: 18px; line-height: 1; color: #a1a8b0; font-weight: 600 }
+.mi .rt.txt { font-size: 13px; font-weight: 600; letter-spacing: .01em; color: #8a929b }
+.mi .lbl { line-height: 1.2 }
+.mi .sub { margin-top: 1px; line-height: 1.15 }
+.mi .ico { align-self: center }
+
+/* ---------- smileys: every face the same size, dead centre ---------- */
+.bubble > img.smiley { width: 74%; height: 74%; margin: 0; object-fit: contain; grid-area: 1 / 1 }
+.mascot-wrap > img.smiley { width: 74%; height: 74% }
+.alert .smiley { width: 40px; height: 40px }
+.boot .smiley { width: 96px; height: 96px }
+
+/* ---------- send bar: the crate, always in reach ---------- */
+.sendbar {
+  position: absolute; left: 6px; right: 6px; bottom: 6px; z-index: 3; display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px 5px 6px; border-radius: 10px; color: #fff; cursor: pointer;
+  background: linear-gradient(180deg, #ff6aa8, #ff2e88); box-shadow: 0 3px 10px rgba(255,46,136,.35), inset 0 1px 0 rgba(255,255,255,.4);
+  animation: alertIn .35s var(--spring) both;
+}
+.sendbar .n { flex: none; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 7px; background: #fff; color: #ff2e88; font-size: 14px; font-weight: 800 }
+.sendbar .t { flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.sendbar .t i { display: block; font-style: normal; font-size: 10.5px; font-weight: 600; opacity: .9 }
+.sendbar .go { flex: none; font-size: 20px; font-weight: 700 }
+.sendbar:active { transform: scale(.98) }
+.sendbar.busy { background: linear-gradient(180deg, #8fc1ff, #2f7ff0); box-shadow: 0 3px 10px rgba(47,127,240,.35) }
+.has-foot .menu { height: calc(100% - 44px) }
+
+/* ---------- device feel: nothing selectable, zoomable or draggable ---------- */
+html { touch-action: manipulation; -webkit-touch-callout: none; -webkit-text-size-adjust: 100% }
+img, svg { -webkit-user-drag: none; user-select: none }
+.wheel, .wb, .select, .zone, .mi, .sendbar, .help-btn { -webkit-touch-callout: none; touch-action: none }
+.menu, .menu .mi { touch-action: pan-y }
+:focus:not(:focus-visible) { outline: none }
+/* home-screen app: room for the status bar */
+html.app .stage { padding-top: calc(env(safe-area-inset-top, 0px) + 4px) }

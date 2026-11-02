@@ -10,12 +10,13 @@ Everyone adds 1 to 5 songs a month. The songs build into one mix that plays on a
 
 ## What it does
 - **The iPod is the interface.** Slide around the click wheel to scroll, tap the top or bottom of the ring to step, press the centre to select, and use menu to go back. On phones, taps on the wheel use the iPhone's haptics.
-- **Monthly mix.** Each person adds up to 5 songs a month, stacks them in a crate first, then submits. Duplicates are blocked, and a new mix starts every month.
-- **Play Full Mix.** Plays full songs through YouTube on whatever device is plugged into the speaker. Preview Mix plays 30-second clips.
+- **Monthly mix.** Each person adds up to 5 songs a month. Picks collect in a crate and send themselves a few seconds after the last one (or straight away when the crate is full), and everything lands in one place: This Month, with your picks at the top. Duplicates are blocked, removing a song asks first, and a new mix starts every month.
+- **Play Full Mix.** If you listen on Spotify and you're connected, the month's playlist starts on whatever device your Spotify is open on (Premium), or opens in the Spotify app for you to press play. Otherwise full songs play through YouTube right on the iPod screen. Preview Mix plays 30-second clips.
 - **Search that finds the real versions.** Explicit versions first, with 30-second previews, plus suggestions: For you, Trending, Class faves and a monthly mood.
 - **Your own music.** Connect Spotify to see your liked songs, top songs and playlists. Apple Music users can paste a shared playlist link instead.
 - **Save the mix** to Spotify or YouTube Music as a playlist.
-- **Make it yours.** Choose an iPod classic, mini or nano in white, black, chrome, U2 red or the mini colours. The page follows the device's light or dark mode.
+- **Make it yours.** Choose an iPod classic, mini or nano in white, black, chrome, U2 red or the mini colours. The page follows the device's light or dark mode, and the background takes a soft colour from the screen you're on.
+- **Feels like a device.** Add it to the home screen and it opens full screen with no browser bars, zooming or long-press menus. Your setup (name, iPod, crate, app) is saved, and "Remember me with Face ID" brings it back in the home-screen app or on a new phone.
 
 ## Set it up (about 15 minutes, free)
 It runs on Cloudflare Pages with a small Cloudflare D1 database. You need Node 22+ and a free Cloudflare account.
@@ -42,8 +43,8 @@ Your site is now at `https://class-radio.pages.dev` (or whatever project name yo
 
 ### Optional extras
 - **Full songs (Play Full Mix) and YouTube playlist links:** create a YouTube Data API v3 key in Google Cloud, then `wrangler pages secret put YT_KEY --project-name=class-radio`.
-- **Spotify connect and saving:** create an app at developer.spotify.com, add your site URL (with a trailing `/`) as a redirect URI, and put its Client ID in `config.js`. In development mode, add each person's Spotify email under User Management.
-- **YouTube Music connect and saving:** in Google Cloud, set up the Google Auth Platform (External), create a Web OAuth client with your site as an authorized JavaScript origin, add people as test users, and put the Client ID in `config.js`.
+- **Spotify connect, saving and playing:** create an app at developer.spotify.com, add your site URL (with a trailing `/`) as a redirect URI, and put its Client ID in `config.js`. In development mode, add each person's Spotify email under User Management. Starting playback from the site needs Spotify Premium; without it, the mix opens in the Spotify app instead.
+- **YouTube Music connect and saving:** in Google Cloud, set up the Google Auth Platform (External), create a Web OAuth client with your site as an authorized JavaScript origin and your site URL (with a trailing `/`) as an authorized redirect URI, add people as test users, and put the Client ID in `config.js`.
 - **Apple Music library connect:** needs a paid Apple Developer membership. Set `APPLE_TEAM_ID`, `APPLE_KEY_ID` and `APPLE_PRIVATE_KEY` (a MusicKit key) as Pages secrets. Without it, Apple Music users can still paste playlist links.
 
 ## Moderation

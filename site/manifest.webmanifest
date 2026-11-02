@@ -2,7 +2,8 @@
   "name": "Class Radio",
   "short_name": "Class Radio",
   "start_url": "/",
-  "display": "browser",
+  "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#ecebe6",
   "theme_color": "#ecebe6",
   "icons": [

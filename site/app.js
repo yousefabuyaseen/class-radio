@@ -21,9 +21,36 @@
   const put = (el, ...kids) => el && el.replaceChildren(...kids.flat(Infinity).filter(k => k != null && k !== false && k !== ""));
   const store = {
     get(k) { try { return localStorage.getItem(k) } catch { return null } },
-    set(k, v) { try { localStorage.setItem(k, v) } catch {} },
+    set(k, v) { try { localStorage.setItem(k, v) } catch {} if (PREF_KEYS.includes(k)) syncPrefs() },
     json(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } },
   };
+  // Everything that makes the iPod yours. It's saved on the server too, so Safari and the home-screen app match.
+  const PREF_KEYS = ["ideradio.name", "ideradio.svc", "ideradio.model", "ideradio.edition", "ideradio.settings", "ideradio.crate", "ideradio.onboarded", "ideradio.vol", "ideradio.lists", "ideradio.hist"];
+  let prefsT, prefsReady = false;
+  function syncPrefs() {
+    if (!prefsReady) return;
+    clearTimeout(prefsT);
+    prefsT = setTimeout(() => {
+      const prefs = {}; for (const k of PREF_KEYS) { const v = store.get(k); if (v != null) prefs[k] = v }
+      const at = Date.now(); try { localStorage.setItem("ideradio.prefsAt", at) } catch {}
+      fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, prefs, at }), keepalive: true }).catch(() => {});
+    }, 1200);
+  }
+  async function pullPrefs() {
+    try {
+      const j = await (await fetch("/api/prefs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) })).json();
+      const localAt = Number(store.get("ideradio.prefsAt") || 0);
+      if (j.prefs && j.at > localAt) {
+        const changed = PREF_KEYS.some(k => (j.prefs[k] ?? null) !== store.get(k));
+        for (const k of PREF_KEYS) try { j.prefs[k] != null ? localStorage.setItem(k, j.prefs[k]) : localStorage.removeItem(k) } catch {}
+        try { localStorage.setItem("ideradio.prefsAt", j.at) } catch {}
+        if (changed && !sessionStorage.getItem("ideradio.pulled")) { sessionStorage.setItem("ideradio.pulled", "1"); location.reload(); return false }
+      }
+      prefsReady = true;
+      if (!j.prefs || j.at < localAt || !localAt) syncPrefs();
+    } catch { prefsReady = true }
+    return true;
+  }
   const monthKey = (d = new Date()) => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
   const toDate = k => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1) };
   const monthLabel = k => toDate(k).toLocaleString("en", { month: "long", year: "numeric" });
@@ -56,6 +83,29 @@
   if (!token) { token = rand(24); store.set("ideradio.token", token) }
   let myHash = null;
   let myName = store.get("ideradio.name") || "";
+
+  const PK_NAME = /iPhone|iPad|Macintosh/.test(navigator.userAgent) && "ontouchend" in document ? "Face ID" : "a passkey";
+  const PK = {
+    ok: !!(window.PublicKeyCredential && navigator.credentials && window.isSecureContext),
+    saved: () => !!store.get("ideradio.pk"),
+    async save() {
+      const label = (myName || "Listener") + " · " + NAME;
+      await navigator.credentials.create({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: NAME, id: location.hostname },
+        user: { id: new TextEncoder().encode(token), name: label, displayName: label },
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+        authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "preferred" }, timeout: 60000,
+      } });
+      store.set("ideradio.pk", "1"); syncPrefs();
+    },
+    async restore() {
+      const c = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), rpId: location.hostname, userVerification: "preferred", timeout: 60000 } });
+      const t = new TextDecoder().decode(c.response.userHandle || new Uint8Array());
+      if (!/^[0-9a-f]{32,64}$/.test(t)) throw new Error("not ours");
+      try { localStorage.setItem("ideradio.token", t); localStorage.setItem("ideradio.pk", "1"); localStorage.removeItem("ideradio.prefsAt"); sessionStorage.removeItem("ideradio.pulled") } catch {}
+      location.reload();
+    },
+  };
 
   // ---------- data ----------
   function apiStore() {
@@ -153,7 +203,8 @@
         code_challenge_method: "S256", code_challenge: challenge, scope: this.SCOPES,
       }));
     },
-    SCOPES: "playlist-modify-private playlist-modify-public playlist-read-private user-library-read user-top-read user-read-recently-played",
+    SCOPES: "playlist-modify-private playlist-modify-public playlist-read-private user-library-read user-top-read user-read-recently-played user-modify-playback-state user-read-playback-state",
+    canPlay() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-modify-playback-state")) },
     canRead() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-library-read")) },
     async items(path, pick) {
       const r = await this.api(path); if (!r.ok) throw new Error("sp " + r.status);
@@ -244,30 +295,43 @@
       }
     },
   };
+  // One Spotify playlist per month: updated if we made it before, otherwise created. Used by Save and by Play Full Mix.
+  async function spotifyPlaylist(month) {
+    const tracks = songsFor(month), uris = [];
+    for (const t of tracks) { const f = await SP.find(t); if (f) uris.push(f.uri) }
+    const miss = tracks.length - uris.length, known = SP.lists[month];
+    if (known) {
+      try { await SP.replaceAll(known.id, uris); return { ...known, n: uris.length, miss, updated: true } }
+      catch (e) { if (e.message === "forbidden") throw e }
+    }
+    const pl = await SP.createPlaylist(NAME + " · " + monthLabel(month));
+    await SP.addAll(pl.id, uris);
+    SP.lists[month] = { id: pl.id, url: pl.external_urls.spotify }; store.set("ideradio.sppl", JSON.stringify(SP.lists));
+    return { ...SP.lists[month], n: uris.length, miss };
+  }
+  const spotifyFail = e => toast(e && e.message === "forbidden" ? `Spotify hasn't approved this account for ${NAME} yet. Ask ${OWNER} to add you.` : "Spotify didn't respond. Try again.");
   async function saveToSpotify(month) {
     if (!SP.connected()) return SP.login({ action: "save", month });
-    const tracks = songsFor(month);
-    if (!tracks.length) return toast("Nothing to save yet");
+    if (!songsFor(month).length) return toast("Nothing to save yet");
     toast("Saving to Spotify…");
     try {
-      const uris = [];
-      for (const t of tracks) { const f = await SP.find(t); if (f) uris.push(f.uri) }
-      const miss = tracks.length - uris.length, note = miss ? ` (${miss} not on Spotify)` : "";
-      // One playlist per month: update it if we made it before, otherwise create it.
-      const known = SP.lists[month];
-      if (known) {
-        try {
-          await SP.replaceAll(known.id, uris);
-          return toast(`Playlist updated: ${uris.length} songs${note}`, { href: known.url, text: "Open in Spotify ↗" }, "big/good.png");
-        } catch (e) { if (e.message === "forbidden") throw e }
+      const p = await spotifyPlaylist(month), note = p.miss ? ` (${p.miss} not on Spotify)` : "";
+      toast(`${p.updated ? "Playlist updated" : "Saved"}: ${p.n} songs${note}`, { href: p.url, text: "Open in Spotify ↗" }, "big/good.png");
+    } catch (e) { spotifyFail(e) }
+  }
+  // Full songs through the listener's own Spotify: start the month's playlist on whatever device Spotify is open on
+  // (phone, laptop or the speaker). Without an active device or Premium, hand them the playlist to press play in the app.
+  async function playOnSpotify(month) {
+    toast("Sending the mix to Spotify…");
+    try {
+      const p = await spotifyPlaylist(month);
+      if (SP.canPlay()) {
+        const r = await SP.api("/me/player/play", { method: "PUT", body: JSON.stringify({ context_uri: "spotify:playlist:" + p.id }) }).catch(e => ({ status: e.message === "forbidden" ? 403 : 0 }));
+        if (r.status === 204 || r.status === 202 || r.ok) return toast("Playing on Spotify", { href: p.url, text: "Open Spotify ↗" }, "big/music.png");
+        if (r.status === 403) return toast("Playing from here needs Spotify Premium. Open the mix in Spotify instead.", { href: p.url, text: "Open in Spotify ↗" });
       }
-      const pl = await SP.createPlaylist(NAME + " · " + monthLabel(month));
-      await SP.addAll(pl.id, uris);
-      SP.lists[month] = { id: pl.id, url: pl.external_urls.spotify }; store.set("ideradio.sppl", JSON.stringify(SP.lists));
-      toast(`Saved ${uris.length} songs${note}`, { href: pl.external_urls.spotify, text: "Open in Spotify ↗" }, "big/good.png");
-    } catch (e) {
-      toast(e && e.message === "forbidden" ? `Spotify hasn't approved this account for ${NAME} yet. Ask ${OWNER} to add you.` : "Spotify save failed. Try again.");
-    }
+      toast("Your mix is ready in Spotify. Open it and press play.", { href: p.url, text: "Open in Spotify ↗" }, "big/music.png");
+    } catch (e) { spotifyFail(e) }
   }
   let resolving = false;
   async function resolveSpotify() {
@@ -315,17 +379,27 @@
 
   const YT = {
     cid: CFG.googleClientId, token: null, exp: 0, gis: null,
-    preload() { if (this.cid && !this.gis) this.gis = loadScript("https://accounts.google.com/gsi/client").catch(() => { this.gis = null }) },
-    auth() {
+    preload() {},
+    auth(intent) {
       if (this.token && Date.now() < this.exp) return Promise.resolve(this.token);
-      return new Promise((res, rej) => {
-        if (!window.google || !google.accounts || !google.accounts.oauth2) return rej(new Error("gis"));
-        google.accounts.oauth2.initTokenClient({
-          client_id: this.cid, scope: "https://www.googleapis.com/auth/youtube",
-          callback: r => { if (r.error) return rej(r); this.token = r.access_token; this.exp = Date.now() + (r.expires_in - 60) * 1000; store.set("ideradio.yt", JSON.stringify({ t: this.token, exp: this.exp })); store.set("ideradio.ytOn", "1"); res(this.token) },
-          error_callback: rej,
-        }).requestAccessToken();
-      });
+      const st = rand(8);
+      sessionStorage.setItem("ideradio.ytauth", JSON.stringify({ st, intent: intent || { action: "connect" } }));
+      location.assign("https://accounts.google.com/o/oauth2/v2/auth?" + new URLSearchParams({
+        client_id: this.cid, redirect_uri: location.origin + "/", response_type: "token", state: st,
+        scope: "https://www.googleapis.com/auth/youtube", include_granted_scopes: "true",
+      }));
+      return new Promise(() => {});
+    },
+    callback() {
+      const q = new URLSearchParams(location.hash.slice(1));
+      if (!q.has("access_token") && !q.has("error")) return null;
+      history.replaceState(null, "", location.pathname + location.search);
+      let saved; try { saved = JSON.parse(sessionStorage.getItem("ideradio.ytauth")) } catch {}
+      sessionStorage.removeItem("ideradio.ytauth");
+      if (q.has("error") || !saved || saved.st !== q.get("state")) { toast("YouTube didn't connect"); return null }
+      this.token = q.get("access_token"); this.exp = Date.now() + (Number(q.get("expires_in") || 3600) - 60) * 1000;
+      store.set("ideradio.yt", JSON.stringify({ t: this.token, exp: this.exp })); store.set("ideradio.ytOn", "1");
+      return saved.intent || {};
     },
     // Google tokens last an hour; remember that the user connected so we can quietly ask again.
     connected() { return !!(this.cid && store.get("ideradio.ytOn")) },
@@ -354,7 +428,7 @@
   YT.restore();
   async function saveToYouTube(month) {
     if (!songsFor(month).length) return toast("Nothing to save yet");
-    try { await YT.auth() } catch { YT.preload(); return toast("YouTube didn't connect. Try again.") }
+    await YT.auth({ action: "ytsave", month });
     toast("Saving to YouTube…");
     await resolveYt(month, true);
     const ids = songsFor(month).map(s => s.yt).filter(Boolean);
@@ -454,7 +528,11 @@
     if (dzCache.has(ck)) return dzCache.get(ck);
     try {
       const r = await fetch(`/api/search?limit=${limit}&q=` + encodeURIComponent(q), { signal });
-      if (r.ok) { const out = preferExplicit((await r.json()).songs || []).slice(0, limit); if (out.length) { dzCache.set(ck, out); return out } }
+      if (r.ok) {
+        const alt = x => ALT.test(x.title || "") && !ALT.test(q) ? 1 : 0; // originals before remixes, unless you searched for one
+        const out = preferExplicit((await r.json()).songs || []).sort((x, y) => alt(x) - alt(y)).slice(0, limit);
+        if (out.length) { dzCache.set(ck, out); return out }
+      }
     } catch (e) { if (e.name === "AbortError") throw e }
     return itunes(q, limit, signal);
   }
@@ -596,10 +674,10 @@
       this.list = list; this.i = Math.min(at, list.length - 1); this.on = true;
       openNP();
       await this.load();
-      if (!window.YT || !YT.Player) { this.on = false; return toast("The YouTube player didn't load") }
+      if (!window.YT || !window.YT.Player) { this.on = false; return toast("The YouTube player didn't load. Try again.") }
       if (!this.player) {
         await new Promise(res => {
-          this.player = new YT.Player("ytPlayer", {
+          this.player = new window.YT.Player("ytPlayer", {
             width: "100%", height: "100%", videoId: this.item().yt,
             playerVars: { autoplay: 1, playsinline: 1, controls: 0, modestbranding: 1, rel: 0, disablekb: 1 },
             events: {
@@ -635,7 +713,7 @@
   function hideVideo() { ytHost.style.left = "-9999px" }
 
   // ---------- feedback: click sound + haptics ----------
-  const settings = Object.assign({ clicker: true, haptics: true, wheelHaptics: true }, store.json("ideradio.settings", {}));
+  const settings = Object.assign({ clicker: true, haptics: true }, store.json("ideradio.settings", {}));
   const saveSettings = () => store.set("ideradio.settings", JSON.stringify(settings));
   let ac = null;
   function click() {
@@ -658,17 +736,6 @@
   }
   const tapLabel = (attrs, fn, ...kids) => onTap(h("label", Object.assign({ role: "button", tabindex: "0" }, attrs), settings.haptics ? SW() : null, ...kids), fn);
   const tickFx = () => { click(); buzz() };
-  // Beta: on iPhones that still allow it (iOS 17.4 to 26.4), a page clicking a switch's label itself also buzzes,
-  // which is the only way to get a tick per step while a finger slides around the wheel.
-  const hapLab = h("label", { class: "hap", "aria-hidden": "true" }, SW());
-  document.body.append(hapLab);
-  let hapT = 0;
-  function wheelTick() {
-    if (!settings.haptics || !settings.wheelHaptics || navigator.vibrate) return;
-    const n = performance.now(); if (n - hapT < 28) return; hapT = n;
-    hapLab.click();
-  }
-
   // ---------- the iPod itself: editions, hold switch, backlight ----------
   // Model = the shape (classic, mini, nano); finish = the colour. Both are remembered on this device.
   const MODELS = {
@@ -710,7 +777,9 @@
   function pop() {
     if (stack.length <= 1) return false;
     if (pvKey && pvKey.startsWith("p:")) stopPreview();
-    stack.pop(); render("in-l"); return true;
+    stack.pop(); render("in-l");
+    if (stack.length === 1 && state.crate.length && !state.busy) submitCrate();
+    return true;
   }
   function openNP() { if (cur() && cur().kind === "np") return render(null); push({ title: "Now Playing", kind: "np" }) }
   const itemsOf = s => (typeof s.items === "function" ? s.items() : s.items || []).filter(Boolean);
@@ -776,6 +845,7 @@
       body.append(h("ul", { class: "menu", role: "listbox" }, items.map((it, i) => rowEl(it, i, s))));
     }
     if (s.foot) { const f = s.foot(); if (f) body.append(f) }
+    const sb = sendBar(); if (sb) { body.querySelector(".foot")?.remove(); body.append(sb); body.classList.add("has-foot") }
     return body;
   }
   function render(anim) {
@@ -815,7 +885,10 @@
     const top = ul.scrollTop, items = itemsOf(s); s._items = items; clampSel(s, items);
     put(ul, items.map((it, i) => rowEl(it, i, s)));
     ul.scrollTop = top;
-    const f = body.querySelector(".foot"); if (f && s.foot) f.replaceWith(s.foot());
+    body.querySelector(".foot")?.remove(); body.querySelector(".sendbar")?.remove();
+    const sb = sendBar(), f = !sb && s.foot && s.foot();
+    if (sb) body.append(sb); else if (f) body.append(f);
+    body.classList.toggle("has-foot", !!(sb || f));
   }
   function mark() {
     const s = cur();
@@ -858,24 +931,62 @@
     if (selectable(it) && it.action) { buzz(true); click(); it.action(it) }
   }
   // Instagram-style: rest on a song for a moment and it starts playing.
+  // Songs from Spotify / YouTube / Apple links have no clip of their own: borrow one from search, once per song.
+  const pvLook = new Map();
+  function ensurePreview(song) {
+    if (song.preview) return Promise.resolve(song);
+    const k = keyOf(song);
+    if (!pvLook.has(k)) pvLook.set(k, search([(song.artist || "").split(",")[0], song.title].filter(Boolean).join(" "), 3).then(r => {
+      const hit = bestMatch(song, r);
+      if (hit) { song.preview = hit.preview; song.artwork = song.artwork || hit.artwork; song.explicit = song.explicit || hit.explicit; song.links = { ...hit.links, ...song.links } }
+      return song;
+    }).catch(() => song));
+    return pvLook.get(k);
+  }
+  // Pick the same recording: same title and artist, and no remix / live / cover version unless that's what was asked for.
+  const norm = t => (t || "").toLowerCase().replace(/\s*[\(\[][^\)\]]*[\)\]]/g, "").replace(/\s+-\s+.*$/, "").replace(/[^a-z0-9\u00c0-\uffff]+/g, " ").trim();
+  const ALT = /remix|mix\)|live|acoustic|karaoke|instrumental|cover|tribute|sped up|slowed|reverb|8.?bit|lullaby|version|edit\b|demo/i;
+  function bestMatch(song, list) {
+    const t = norm(song.title), a = norm((song.artist || "").split(",")[0]), wantAlt = ALT.test(song.title || "");
+    let best = null, top = -1;
+    for (const x of list) {
+      let sc = 0;
+      if (norm(x.title) === t) sc += 4; else if (norm(x.title).startsWith(t)) sc += 1;
+      if (a && norm(x.artist).includes(a)) sc += 3;
+      if (!wantAlt && ALT.test(x.title || "")) sc -= 3;
+      if (x.preview) sc += 1;
+      if (sc > top) { top = sc; best = x }
+    }
+    return best;
+  }
+  // Keep the next few clips loading in the background so a resting finger starts music almost at once.
+  const warm = new Map();
+  function warmUp(url) {
+    if (!url || warm.has(url)) return;
+    const a = new Audio(); a.preload = "auto"; a.muted = true; a.src = url; warm.set(url, a);
+    if (warm.size > 6) { const [k, old] = warm.entries().next().value; old.src = ""; warm.delete(k) }
+  }
+  function prefetchAround(s) {
+    const items = s._items || [];
+    for (let d = 0; d <= 3; d++) for (const i of d ? [s.sel + d, s.sel - d] : [s.sel]) {
+      const it = items[i]; if (it && it.song) ensurePreview(it.song).then(x => warmUp(x.preview));
+    }
+  }
   let apT;
   function autoPreview(s) {
     clearTimeout(apT);
+    prefetchAround(s);
     apT = setTimeout(() => {
       if (cur() !== s || !unlocked) return;
       const it = (s._items || [])[s.sel];
       if (!it || !it.song) return;
       const song = it.song;
-      const go = () => { if (cur() !== s || (s._items || [])[s.sel] !== it || !song.preview) return; const k = "p:" + keyOf(song); if (pvKey !== k) playPreview(song, k, null) };
-      if (song.preview) return go();
-      // Songs from Spotify or YouTube libraries have no clip, so borrow Apple's 30-second preview.
-      if (song._looked) return; song._looked = true;
-      itunes([song.artist.split(",")[0], song.title].filter(Boolean).join(" "), 1).then(r => {
-        if (!r[0]) return;
-        song.preview = r[0].preview; song.artwork = song.artwork || r[0].artwork; song.links = { ...r[0].links, ...song.links };
-        go();
-      }).catch(() => {});
-    }, 650);
+      ensurePreview(song).then(() => {
+        const now = (s._items || [])[s.sel];
+        if (cur() !== s || !now || now.song !== song || !song.preview) return;
+        const k = "p:" + keyOf(song); if (pvKey !== k) playPreview(song, k, null);
+      });
+    }, 320);
   }
 
   let alertT;
@@ -944,7 +1055,7 @@
   const MAIN = {
     title: NAME, items: () => [
       nowItem() && { icon: ["♪", "#ff2e88"], label: "Now Playing", right: "›", action: openNP },
-      { icon: ["★", "#2f7ff0"], label: "This Month", right: "›", action: () => push(monthScreen(CURRENT)) },
+      { icon: ["★", "#2f7ff0"], label: "This Month", sub: `${monthName(CURRENT)} mix · ${songsFor(CURRENT).length} song${songsFor(CURRENT).length === 1 ? "" : "s"}${mine().length ? " · you're in" : ""}`, right: "›", action: () => push(monthScreen(CURRENT)) },
       { icon: ["+", "#22b455"], label: "Add Songs", right: "›", hot: mine().length === 0, action: () => push(addScreen()) },
       myMusicItem(),
       state.crate.length && { icon: ["▤", "#ff8a00"], label: `Your Crate (${state.crate.length})`, right: "›", hot: true, action: () => push(crateScreen()) },
@@ -979,8 +1090,10 @@
           if (k === CURRENT) rows.push({ label: "Be the First", right: "›", hot: true, action: () => push(addScreen()) });
         } else {
           const dj = new Set(t.map(s => s.owner_hash)).size;
-          rows.push({ head: true, label: `${t.length} song${t.length === 1 ? "" : "s"} · ${dj} DJ${dj === 1 ? "" : "s"}` });
-          rows.push(...t.map(s => ({ label: s.title, sub: [s.artist, s.name || "anon"].filter(Boolean).join(" · "), art: s.artwork || "", playing: isPlaying(s), right: "›", action: () => push(songScreen(s)) })));
+          const row = s => ({ label: s.title, sub: [s.artist, s.name || "anon"].filter(Boolean).join(" · "), art: s.artwork || "", playing: isPlaying(s), right: "›", action: () => push(songScreen(s)) });
+          const yours = t.filter(s => s.owner_hash && s.owner_hash === myHash), rest = t.filter(s => !yours.includes(s));
+          if (yours.length) rows.push({ head: true, label: `Your picks · ${yours.length} of ${MAX}` }, ...yours.map(row));
+          if (rest.length) rows.push({ head: true, label: `${yours.length ? "Everyone else" : t.length + " songs"} · ${dj} DJ${dj === 1 ? "" : "s"}` }, ...rest.map(row));
         }
         return rows;
       },
@@ -994,7 +1107,7 @@
         s.preview && { label: isPlaying(s) && !SPK.on ? "Pause Preview" : "Play Preview", right: "▶", action: () => { playPreview(s, "s:" + s.id, null); openNP() } },
         s.yt && { label: "Play Full Song", right: "♪", action: () => SPK.start([s]) },
         { label: "Open in " + svcName(), right: "↗", action: () => window.open(linkFor(s), "_blank", "noopener") },
-        s.month === CURRENT && s.owner_hash === myHash && { label: "Remove From Mix", right: "×", action: () => { removeSong(s); pop() } },
+        s.month === CURRENT && s.owner_hash === myHash && { label: "Remove From Mix", right: "×", action: () => push(confirmScreen("Remove?", s.title, "Remove from the Mix", () => { removeSong(s); pop() })) },
       ],
     };
   }
@@ -1083,7 +1196,7 @@
   function crateScreen() {
     return {
       title: "Your Crate", items: () => state.crate.length ? [
-        ...state.crate.map(s => ({ label: s.title, sub: s.artist, art: s.artwork || "", song: s, right: "×", action: () => toggleCrate(s) })),
+        ...state.crate.map(s => ({ label: s.title, sub: s.artist, art: s.artwork || "", song: s, right: "×", action: () => removeFromCrate(s) })),
         { label: "Name: " + (myName || "anon"), right: "›", action: () => push(nameScreen()) },
         { label: state.busy ? "Sending…" : `Submit ${state.crate.length} Song${state.crate.length === 1 ? "" : "s"}`, right: "›", hot: true, action: submitCrate },
       ] : [{ label: "Your crate is empty", dim: true }, { label: "Add Songs", right: "›", action: () => push(addScreen()) }],
@@ -1120,9 +1233,14 @@
         AM.enabled && (AM.connected
           ? { icon: ["♪", "#fa2d48"], label: "Apple Music", sub: "connected", right: "✓", action: () => push(disconnectScreen("Apple Music", () => AM.disconnect())) }
           : { icon: ["♪", "#fa2d48"], label: "Connect Apple Music", right: "›", action: () => connectLib("apple") }),
+        PK.ok && { icon: ["☺", "#2f7ff0"], label: "Remember Me", sub: PK.saved() ? `saved with ${PK_NAME}` : `save your setup with ${PK_NAME}`, right: PK.saved() ? "✓" : "›",
+          action: () => push({ title: "Remember Me", items: () => [
+            { head: true, label: "Name, iPod, crate and app choice" },
+            { label: PK.saved() ? "Save Again" : `Save with ${PK_NAME}`, right: "›", action: async () => { try { await PK.save(); toast("Saved", null, "big/good.png"); refresh() } catch {} } },
+            { label: `Restore with ${PK_NAME}`, right: "›", action: async () => { try { await PK.restore() } catch { toast(`No saved setup found with ${PK_NAME}`) } } },
+          ] }) },
         { icon: ["♫", "#0fb5a8"], label: "Clicker", right: settings.clicker ? "On" : "Off", action: () => { settings.clicker = !settings.clicker; saveSettings(); refresh() } },
         { icon: ["≋", "#8a5cff"], label: "Haptics", right: settings.haptics ? "On" : "Off", action: () => { settings.haptics = !settings.haptics; saveSettings(); refresh() } },
-        settings.haptics && !navigator.vibrate && { icon: ["↻", "#8a5cff"], label: "Wheel Haptics", sub: "beta: buzz while scrolling", right: settings.wheelHaptics ? "On" : "Off", action: () => { settings.wheelHaptics = !settings.wheelHaptics; saveSettings(); refresh() } },
         { icon: ["☺", "#ff2e88"], label: "Replay Intro", right: "›", action: () => onboarding() },
         { icon: ["i", "#2f7ff0"], label: "About", right: "›", action: () => push({ title: "About", kind: "text", text: NAME + " is our class radio. Everyone adds 1 to 5 songs a month, and the mix plays on the class speaker." }) },
       ],
@@ -1170,7 +1288,7 @@
       connect: () => AM.connect(),
       shelves: () => [["Library Songs", "♥", () => AM.liked()], ["Recently Played", "◷", () => AM.recent()]] },
     youtube: { name: "My YouTube Music", svc: "YouTube Music", icon: ["▶", "#ff0033"], api: YT, avail: () => !!YT.cid, on: () => YT.connected(), ready: () => true,
-      connect: () => YT.auth().then(() => refresh()),
+      connect: () => YT.auth({ action: "ytmine" }),
       shelves: () => [["Liked Songs", "♥", () => YT.liked()]] },
   };
   const libsAvail = () => Object.keys(LIB).filter(k => LIB[k].avail());
@@ -1268,6 +1386,7 @@
   function playFullMix(k) {
     if (SPK.on) return SPK.stop();
     if (!songsFor(k).length) return toast("Nothing to play yet", null, "big/hi.png");
+    if (state.service === "spotify" && SP.connected()) return playOnSpotify(k);
     if (!ytOn) { toast("Full songs aren't set up yet, playing 30s previews"); return startMix(k) }
     SPK.start(songsFor(k));
   }
@@ -1284,20 +1403,58 @@
   }
 
   // ---------- crate ----------
+  function confirmScreen(title, what, yes, fn) {
+    return { title, confirm: true, tint: tintOf(cur() || {}) || undefined, items: () => [
+      { head: true, label: what },
+      { label: yes, right: "×", action: () => { pop(); fn() } },
+      { label: "Keep It", right: "›", action: () => pop() },
+    ], sel: 2 };
+  }
+  // Songs in the crate send themselves: right away when the crate is full, otherwise a few seconds after the last pick.
+  const SEND_IN = 10;
+  let sendAt = 0, sendTick;
+  function armSend() {
+    clearInterval(sendTick);
+    if (!state.crate.length) { sendAt = 0; return }
+    sendAt = Date.now() + (slotsLeft() ? SEND_IN : 1.2) * 1000;
+    sendTick = setInterval(() => {
+      if (!state.crate.length || state.busy) { clearInterval(sendTick); sendAt = 0; return }
+      if (cur() && cur().confirm) { sendAt += 250; return } // never send while asking a question
+      if (Date.now() >= sendAt) { clearInterval(sendTick); sendAt = 0; submitCrate() } else paintSendBar();
+    }, 250);
+  }
+  function sendBar() {
+    const n = state.crate.length; if (!n) return null;
+    const left = sendAt ? Math.max(0, Math.ceil((sendAt - Date.now()) / 1000)) : 0;
+    return tapLabel({ class: "sendbar" + (state.busy ? " busy" : ""), "aria-label": "Send now" }, () => { if (!state.busy) submitCrate() },
+      h("b", { class: "n" }, n),
+      h("span", { class: "t" }, state.busy ? "Sending…" : `Send to the ${monthName(CURRENT)} mix`, h("i", {}, state.busy ? "" : left ? `sends by itself in ${left}s · tap to send now` : "tap to send")),
+      h("span", { class: "go" }, "›"));
+  }
+  function paintSendBar() {
+    const old = lcd.querySelector(".lcd-body:not(.out) .sendbar"); if (!old) return;
+    const i = old.querySelector("i"), left = Math.max(0, Math.ceil((sendAt - Date.now()) / 1000));
+    if (i && !state.busy) i.textContent = `sends by itself in ${left}s · tap to send now`;
+  }
+  function removeFromCrate(s) {
+    push(confirmScreen("Remove?", s.title, "Remove from Crate", () => { state.crate = state.crate.filter(c => keyOf(c) !== keyOf(s)); saveCrate(); armSend(); refresh() }));
+  }
   function toggleCrate(s) {
     const i = state.crate.findIndex(c => keyOf(c) === keyOf(s));
-    if (i >= 0) state.crate.splice(i, 1);
+    if (i >= 0) return removeFromCrate(s);
     else {
       if (mine().length >= MAX) return toast("You've added all 5 this month");
       if (!slotsLeft()) return toast("Crate's full. Remove one to swap");
       if (songsFor(CURRENT).some(c => keyOf(c) === keyOf(s))) return toast("Already in the mix");
       state.crate.push({ title: s.title, artist: s.artist || "", artwork: s.artwork || null, preview: s.preview || null, links: s.links || {} });
       lcd.animate([{ filter: "brightness(1.12)" }, { filter: "none" }], { duration: 260 });
+      if (!slotsLeft()) alertBox("Crate's full. Sending now…");
     }
-    saveCrate(); refresh();
+    saveCrate(); armSend(); refresh();
   }
   async function submitCrate() {
     if (!state.crate.length || state.busy) return;
+    clearInterval(sendTick); sendAt = 0;
     const songs = state.crate.map(s => ({ ...s, artwork: s.artwork ? safeUrl(s.artwork) : null, preview: s.preview ? safeUrl(s.preview) : null }));
     state.busy = true; refresh();
     await Promise.all(songs.map(async s => {
@@ -1312,7 +1469,7 @@
       const n = state.crate.length; state.crate = []; saveCrate(); state.busy = false;
       if (pvKey && pvKey.startsWith("p:")) stopPreview();
       stack.length = 1; push(monthScreen(CURRENT));
-      buzz(true); toast(n === 1 ? "You're in! 1 song added" : `You're in! ${n} songs added`, null, "big/congratulate.png");
+      buzz(true); toast(`Sent! ${n === 1 ? "Your song is" : `Your ${n} songs are`} in the ${monthName(CURRENT)} mix`, null, "big/congratulate.png");
     } catch (e) {
       state.busy = false;
       const m = String((e && e.message) || "");
@@ -1349,8 +1506,8 @@
       e.preventDefault();
       rot += da; disc.style.rotate = rot + "deg";
       acc += da;
-      while (acc >= STEP) { acc -= STEP; move(1); wheelTick() }
-      while (acc <= -STEP) { acc += STEP; move(-1); wheelTick() }
+      while (acc >= STEP) { acc -= STEP; move(1) }
+      while (acc <= -STEP) { acc += STEP; move(-1) }
     });
     const end = () => { if (!active) return; active = false; setTimeout(() => wheel.classList.remove("dragging"), 0) };
     wheel.addEventListener("pointerup", end);
@@ -1383,6 +1540,17 @@
     else if (k === "ArrowRight") next(1);
     else if (k === "ArrowLeft") next(-1);
   });
+
+  // ---------- feel like a device, not a web page ----------
+  // Browsers keep sound off until the first touch; start it on the very first touch anywhere, not just the wheel.
+  ["pointerdown", "touchend", "keydown"].forEach(ev => addEventListener(ev, unlockAudio, { once: true, capture: true, passive: true }));
+  const typing = e => /input|textarea/i.test((e.target || {}).tagName || "");
+  addEventListener("contextmenu", e => { if (!typing(e)) e.preventDefault() });            // no long-press menus
+  addEventListener("dragstart", e => e.preventDefault());                                   // no dragging images out
+  ["gesturestart", "gesturechange"].forEach(ev => addEventListener(ev, e => e.preventDefault())); // no pinch zoom (iOS)
+  addEventListener("dblclick", e => e.preventDefault(), { passive: false });              // no double-tap zoom
+  addEventListener("touchmove", e => { if (!e.target.closest(".menu")) e.preventDefault() }, { passive: false }); // the page itself never moves
+  if (matchMedia("(display-mode: standalone)").matches || navigator.standalone) document.documentElement.classList.add("app");
 
   // ---------- fit the iPod to the screen ----------
   function fit() {
@@ -1454,7 +1622,7 @@
         : btn("ok", "Connect Spotify", () => { store.set("ideradio.onboarded", "1"); SP.login({ action: "connect" }) });
       if (pick === "youtube" && YT.cid) return YT.connected()
         ? h("div", { class: "ob-btn", style: "opacity:.85" }, "✓ YouTube connected")
-        : btn("ok", "Connect YouTube Music", async () => { try { await YT.auth(); paint() } catch { toast("YouTube didn't connect") } });
+        : btn("ok", "Connect YouTube Music", () => { store.set("ideradio.onboarded", "1"); YT.auth({ action: "connect" }) });
       if (pick === "apple" && AM.enabled) return AM.connected
         ? h("div", { class: "ob-btn", style: "opacity:.85" }, "✓ Apple Music connected")
         : btn("ok", "Connect Apple Music", async () => { try { await AM.connect(); paint() } catch { toast("Apple Music didn't connect") } });
@@ -1467,7 +1635,8 @@
       ob.style.setProperty("--obc", colors[step]);
       let body;
       if (step === 0) body = [face("hi", "ob-char"), h("h2", {}, "Welcome to " + NAME), h("p", {}, "Our class radio. Everyone drops 1 to 5 songs a month, and it all plays on the class speaker."),
-        h("div", { class: "ob-actions" }, btn("", "Let's go →", () => go(1)))];
+        h("div", { class: "ob-actions" }, btn("", "Let's go →", () => go(1)),
+          PK.ok ? btn("ghost", `Been here before? Use ${PK_NAME}`, async () => { try { await PK.restore() } catch { toast(`No saved setup found with ${PK_NAME}`) } }) : null)];
       if (step === 1) body = [face("name", "ob-char"), h("h2", {}, "What should we call you?"), h("p", {}, "It shows next to your picks. Leave it blank to stay anon."),
         h("input", { class: "ob-input", id: "obName", maxlength: "24", placeholder: "Your name", value: myName, autocomplete: "nickname", enterkeyhint: "next", onkeydown: e => { e.stopPropagation(); if (e.key === "Enter") saveName() } }),
         h("div", { class: "ob-actions" }, btn("", "Next →", saveName), btn("ghost", "Stay anon", () => { myName = ""; store.set("ideradio.name", ""); go(2) }))];
@@ -1481,7 +1650,9 @@
         h("div", { class: "ob-actions" }, connectBtn(), btn("ghost", pick ? "Next →" : "Decide later →", () => go(3)))];
       if (step === 3) body = [face("done", "ob-char"), h("h2", {}, myName ? `You're tuned in, ${myName}` : "You're tuned in"),
         h("p", {}, mine().length ? "Your songs are already in this month's mix." : `${Math.ceil(timeLeft() / 864e5)} days left to add your songs this month.`),
-        h("div", { class: "ob-actions" }, btn("ok", "Add my songs", () => close(() => { stack.length = 1; push(addScreen()) })), btn("ghost", "Just look around", () => close()))];
+        h("div", { class: "ob-actions" }, btn("ok", "Add my songs", () => close(() => { stack.length = 1; push(addScreen()) })),
+          PK.ok && !PK.saved() ? btn("ghost", `Remember me with ${PK_NAME}`, async () => { try { await PK.save(); toast("Saved. Your iPod follows you to the home screen and new phones.", null, "big/good.png"); paint() } catch {} }) : null,
+          btn("ghost", "Just look around", () => close()))];
       ob.scrollTop = 0;
       put(card, body, h("div", { class: "ob-dots", "aria-hidden": "true" }, [0, 1, 2, 3].map(i => h("i", { class: i === step ? "on" : "" }))));
       if (step === 1) setTimeout(() => { const i = $("#obName"); i && i.focus({ preventScroll: true }) }, 350);
@@ -1531,7 +1702,7 @@
     let p = 0;
     const step = () => { p = Math.min(100, p + 9 + Math.random() * 14); bar.style.width = p + "%"; if (p < 100) setTimeout(step, reduce ? 0 : 70); else setTimeout(() => { stack.length = 0; push(Object.assign({}, MAIN)); if (afterBoot) { afterBoot(); afterBoot = null } }, reduce ? 0 : 180) };
     setTimeout(step, reduce ? 0 : 450);
-    if (!store.get("ideradio.onboarded") && !/[?&](code|error)=/.test(location.search)) setTimeout(onboarding, reduce ? 0 : 700);
+    if (!store.get("ideradio.onboarded") && !/[?&](code|error)=/.test(location.search) && !/access_token=|error=/.test(location.hash)) setTimeout(onboarding, reduce ? 0 : 700);
   }
   boot();
   setInterval(() => refresh(), 60000);
@@ -1550,6 +1721,13 @@
   }
   (async () => {
     myHash = await sha256(token);
+    if (!(await pullPrefs())) return;
+    const ytIntent = YT.callback();
+    if (ytIntent) {
+      toast("YouTube Music connected", null, "big/good.png");
+      if (ytIntent.action === "ytsave") setTimeout(() => saveToYouTube(ytIntent.month || CURRENT), 1500);
+      if (ytIntent.action === "ytmine") whenBooted(() => { stack.length = 1; push(libScreen("youtube")) });
+    }
     try {
       const r = await fetch("/api/songs", { cache: "no-store" });
       if (r.ok && (r.headers.get("content-type") || "").includes("json")) db = apiStore();
@@ -1566,5 +1744,11 @@
       if (intent && intent.action === "mine") whenBooted(() => { stack.length = 1; push(libScreen("spotify")) });
     } catch { await load() }
     db.subscribe(applyRows);
+    armSend(); // a crate left from last time sends itself
+    // Closing the page with songs still in the crate sends them anyway.
+    addEventListener("pagehide", () => {
+      if (!state.crate.length || state.busy || !db.live) return;
+      try { fetch("/api/songs", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, month: CURRENT, name: myName || "anon", songs: state.crate }) }); state.crate = []; saveCrate() } catch {}
+    });
   })();
 })();
