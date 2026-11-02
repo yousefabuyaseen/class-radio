@@ -279,19 +279,18 @@
       if (!r.ok) throw new Error("create");
       return r.json();
     },
+    // Spotify retired the old /tracks playlist endpoints (they now always answer 403), so only /items is used.
     async replaceAll(id, uris) {
       const body = JSON.stringify({ uris: uris.slice(0, 100) });
-      let r = await this.api(`/playlists/${id}/items`, { method: "PUT", body });
-      if (!r.ok) r = await this.api(`/playlists/${id}/tracks`, { method: "PUT", body });
+      const r = await this.api(`/playlists/${id}/items`, { method: "PUT", body });
       if (!r.ok) throw new Error("replace " + r.status);
       if (uris.length > 100) await this.addAll(id, uris.slice(100));
     },
     async addAll(id, uris) {
       for (let i = 0; i < uris.length; i += 100) {
         const body = JSON.stringify({ uris: uris.slice(i, i + 100) });
-        let r = await this.api(`/playlists/${id}/items`, { method: "POST", body });
-        if (!r.ok) r = await this.api(`/playlists/${id}/tracks`, { method: "POST", body });
-        if (!r.ok) throw new Error("add");
+        const r = await this.api(`/playlists/${id}/items`, { method: "POST", body });
+        if (!r.ok) throw new Error("add " + r.status);
       }
     },
   };
@@ -301,15 +300,23 @@
     for (const t of tracks) { const f = await SP.find(t); if (f) uris.push(f.uri) }
     const miss = tracks.length - uris.length, known = SP.lists[month];
     if (known) {
+      // If last month's playlist was deleted or unfollowed in Spotify, just make a fresh one.
       try { await SP.replaceAll(known.id, uris); return { ...known, n: uris.length, miss, updated: true } }
-      catch (e) { if (e.message === "forbidden") throw e }
+      catch { delete SP.lists[month]; store.set("ideradio.sppl", JSON.stringify(SP.lists)) }
     }
     const pl = await SP.createPlaylist(NAME + " · " + monthLabel(month));
     await SP.addAll(pl.id, uris);
     SP.lists[month] = { id: pl.id, url: pl.external_urls.spotify }; store.set("ideradio.sppl", JSON.stringify(SP.lists));
     return { ...SP.lists[month], n: uris.length, miss };
   }
-  const spotifyFail = e => toast(e && e.message === "forbidden" ? `Spotify hasn't approved this account for ${NAME} yet. Ask ${OWNER} to add you.` : "Spotify didn't respond. Try again.");
+  // Only blame approval when Spotify refuses the account itself, not when one request is refused.
+  async function spotifyFail(e) {
+    if (e && e.message === "forbidden") {
+      const me = await SP.api("/me").catch(x => ({ status: x.message === "forbidden" ? 403 : 0 }));
+      if (me.status === 403) return toast(`Spotify hasn't approved this account for ${NAME} yet. Ask ${OWNER} to add you.`);
+    }
+    toast("Spotify didn't take that. Try again in a moment.");
+  }
   async function saveToSpotify(month) {
     if (!SP.connected()) return SP.login({ action: "save", month });
     if (!songsFor(month).length) return toast("Nothing to save yet");
