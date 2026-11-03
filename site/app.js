@@ -654,9 +654,26 @@
   //   clip    = 30-second previews (Deezer / Apple), played right here
   //   youtube = full songs through the YouTube player on the iPod screen
   //   spotify = full songs on the listener's own Spotify app (phone, laptop or the speaker), remote-controlled from here
-  const pv = new Audio(); pv.preload = "auto";
+  const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const mkDeck = () => { const a = new Audio(); a.preload = "auto"; a.crossOrigin = "anonymous"; a.playsInline = true; return a };
+  const decks = [mkDeck(), mkDeck()], gains = [];
+  let pv = decks[0]; // the deck that's playing now
   let vol = Math.min(1, Math.max(0, Number(store.get("ideradio.vol") || 0.8)));
   pv.volume = vol;
+  // Route both decks through gain controls (preview servers allow it). iPhones ignore <audio> volume, gains they obey.
+  function route() {
+    if (gains.length || !ac) return;
+    try {
+      try { if (navigator.audioSession) navigator.audioSession.type = "playback" } catch {} // play even with the silent switch on
+      decks.forEach((a, i) => { const g = ac.createGain(); ac.createMediaElementSource(a).connect(g).connect(ac.destination); gains[i] = g; a.volume = 1 });
+      setDeck(pv, 1);
+    } catch { gains.length = 0 }
+  }
+  function setDeck(a, f) {
+    const g = gains[decks.indexOf(a)];
+    if (g) g.gain.value = vol * f; else a.volume = Math.max(0, Math.min(1, vol * f));
+  }
+  const otherDeck = () => decks[1 - decks.indexOf(pv)];
   const playOpts = Object.assign({ shuffle: false, repeat: "off" }, store.json("ideradio.play", {})); // repeat: off | all | one
   const savePlay = () => store.set("ideradio.play", JSON.stringify(playOpts));
   const P = {
@@ -680,19 +697,22 @@
   const previewSong = song => playList([song], { engine: "clip", key: "p:" + keyOf(song) });
   function engineStart() {
     const s = P.cur(); if (!s) return stopAll();
-    P.waiting = false;
+    P.waiting = false; cancelFade(); YTP.cancelFade();
     if (P.engine === "clip") {
       ensurePreview(s).then(() => {
         if (P.cur() !== s || P.engine !== "clip") return;
         if (!s.preview) return P.count() > 1 ? advance(1, true) : (toast("No preview for this one"), stopAll());
-        pv.src = s.preview; pv.currentTime = 0;
+        if (ac && ac.state !== "running") ac.resume().catch(() => {});
+        setDeck(pv, 1); pv.src = s.preview; pv.currentTime = 0;
         pv.play().catch(() => { P.waiting = true; onPlayback(true) });
+        readyNext();
       });
     } else if (P.engine === "youtube") YTP.play(s);
     else if (P.engine === "spotify") SPP.play();
     onPlayback(true);
   }
   function engineStop() {
+    cancelFade();
     if (P.engine === "clip") pv.pause();
     if (P.engine === "youtube") YTP.stop();
     if (P.engine === "spotify") SPP.stop();
@@ -736,51 +756,84 @@
   }
   function setRepeat(r) { playOpts.repeat = r; savePlay(); if (P.engine === "spotify") SPP.repeat(); onPlayback(true) }
 
-  pv.addEventListener("play", () => { if (P.engine === "clip") { P.playing = true; P.waiting = false; onPlayback() } });
-  pv.addEventListener("pause", () => { if (P.engine === "clip" && !pv.ended) { P.playing = false; onPlayback() } });
-  pv.addEventListener("ended", () => { if (P.engine === "clip") advance(1, true) });
-  pv.addEventListener("timeupdate", () => { if (P.engine === "clip") setClock(pv.currentTime, pv.duration || 30) });
-  // Deezer preview links expire after ~15 minutes; fetch a fresh one when an old link fails.
-  pv.addEventListener("error", async () => {
-    const it = P.engine === "clip" && P.cur(), dz = it && (it.links || {}).deezer;
-    if (!dz || Date.now() - (it._fresh || 0) < 60000) return;
-    it._fresh = Date.now();
-    try {
-      const j = await (await fetch("/api/search?id=" + dz.split("/").pop())).json();
-      if (j.preview && P.cur() === it) { it.preview = j.preview; pv.src = j.preview; pv.play().catch(() => {}) }
-    } catch {}
+  decks.forEach(a => {
+    a.addEventListener("play", () => { if (a === pv && P.engine === "clip") { P.playing = true; P.waiting = false; onPlayback() } });
+    a.addEventListener("pause", () => { if (a === pv && P.engine === "clip" && !a.ended) { P.playing = false; onPlayback() } });
+    a.addEventListener("ended", () => { if (a === pv && P.engine === "clip") advance(1, true) });
+    a.addEventListener("timeupdate", () => { if (a === pv && P.engine === "clip") { setClock(a.currentTime, a.duration || 30); maybeCrossfade() } });
+    // Deezer preview links expire after ~15 minutes; fetch a fresh one when an old link fails.
+    a.addEventListener("error", async () => {
+      const it = a === pv && P.engine === "clip" && P.cur(), dz = it && (it.links || {}).deezer;
+      if (!dz || Date.now() - (it._fresh || 0) < 60000) return;
+      it._fresh = Date.now();
+      try {
+        const j = await (await fetch("/api/search?id=" + dz.split("/").pop())).json();
+        if (j.preview && P.cur() === it) { it.preview = j.preview; a.src = j.preview; a.play().catch(() => {}) }
+      } catch {}
+    });
   });
+
+  // ---------- crossfade: the next song fades in as this one fades out, like Spotify ----------
+  const nextPos = () => { let p = P.pos + 1; if (p >= P.count()) { if (playOpts.repeat !== "all") return null; p = 0 } return p };
+  const fadeLen = () => (playOpts.repeat === "one" || (P.key || "").startsWith("p:") ? 0 : settings.crossfade || 0);
+  const curve = k => [Math.cos(k * Math.PI / 2), Math.sin(k * Math.PI / 2)]; // equal-power: no dip in loudness halfway
+  function readyNext() { const np = nextPos(); if (np != null) ensurePreview(P.list[P.order[np]]).then(x => warmUp(x.preview)) }
+  let fade = null;
+  function maybeCrossfade() {
+    const len = fadeLen(), d = pv.duration;
+    if (!len || fade || !d || !isFinite(d) || d - pv.currentTime > len) return;
+    const np = nextPos(), next = np != null && P.list[P.order[np]];
+    if (!next || !next.preview) return; // not ready: the song just ends and the next starts normally
+    const out = pv, inn = otherDeck();
+    route(); if (ac && ac.state !== "running") ac.resume().catch(() => {});
+    setDeck(inn, 0); inn.src = next.preview; inn.currentTime = 0;
+    inn.play().catch(() => {});
+    pv = inn; P.pos = np; onPlayback(true);
+    const ms = Math.max(400, (d - out.currentTime) * 1000), t0 = performance.now();
+    fade = { out };
+    const step = () => {
+      if (!fade) return;
+      const [o, i] = curve(Math.min(1, (performance.now() - t0) / ms));
+      setDeck(out, o); setDeck(inn, i);
+      if (o > 0.001) fade.t = setTimeout(step, 50); else { out.pause(); fade = null; readyNext() }
+    };
+    step();
+  }
+  function cancelFade() { if (!fade) return; clearTimeout(fade.t); fade.out.pause(); fade = null; setDeck(pv, 1) }
+
   const SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   let unlocked = false;
   function unlockAudio() {
     if (unlocked) return; unlocked = true;
     try { ac = ac || new (window.AudioContext || window.webkitAudioContext)(); ac.resume() } catch {}
-    if (!P.engine) { pv.muted = true; pv.src = SILENT; pv.play().then(() => { pv.pause(); pv.muted = false }).catch(() => { pv.muted = false }) }
+    if (!P.engine) decks.forEach(a => { a.muted = true; a.src = SILENT; a.play().then(() => { a.pause(); a.muted = false }).catch(() => { a.muted = false }) });
+    route();
     if (ytOn) YTP.create(); // build the YouTube player during this first touch so it's allowed to play with sound later
   }
 
-  // YouTube engine: full songs in a small player on the iPod screen.
+  // YouTube engine: full songs in a small player on the iPod screen. Two players take turns so songs can crossfade.
   let ytOn = false;
   const YTP = {
-    player: null, ready: null, api: null, timer: null, kick: null, state: -1,
+    p: [null, null], ready: [null, null], a: 0, api: null, timer: null, kick: null, state: -1, fade: null,
+    get player() { return this.p[this.a] },
     load() {
       this.api = this.api || new Promise(res => { window.onYouTubeIframeAPIReady = res; loadScript("https://www.youtube.com/iframe_api").catch(() => res()) });
       return this.api;
     },
-    create() {
-      this.ready = this.ready || this.load().then(() => new Promise(res => {
-        if (!window.YT || !window.YT.Player) { this.ready = null; return res(false) }
-        this.player = new window.YT.Player("ytPlayer", {
+    create(i = this.a) {
+      this.ready[i] = this.ready[i] || this.load().then(() => new Promise(res => {
+        if (!window.YT || !window.YT.Player) { this.ready[i] = null; return res(false) }
+        this.p[i] = new window.YT.Player(i ? "ytPlayer2" : "ytPlayer", {
           width: "100%", height: "100%",
           playerVars: { playsinline: 1, controls: 0, modestbranding: 1, rel: 0, disablekb: 1, autoplay: 1, fs: 0, iv_load_policy: 3 },
           events: {
             onReady: e => { e.target.setVolume(vol * 100); res(true) },
-            onStateChange: e => this.change(e.data),
-            onError: () => { if (P.engine === "youtube") advance(1, true) },
+            onStateChange: e => this.change(i, e.data),
+            onError: () => { if (i === this.a && P.engine === "youtube") advance(1, true) },
           },
         });
       }));
-      return this.ready;
+      return this.ready[i];
     },
     async play(s) {
       if (!s.yt && s.id) await findYtFor(s);
@@ -788,20 +841,44 @@
       if (!s.yt) return advance(1, true);
       if (!(await this.create())) return switchEngine("clip", "The YouTube player didn't load, playing 30s previews");
       if (P.cur() !== s) return;
-      this.player.loadVideoById(s.yt); this.player.playVideo();
+      this.player.setVolume(vol * 100); this.player.loadVideoById(s.yt); this.player.playVideo();
+      if (!IOS) this.create(1 - this.a); // get the other player ready for the crossfade
       // Phones sometimes refuse to start a video by themselves: show a clear "press play" instead of a frozen screen.
       clearTimeout(this.kick);
       this.kick = setTimeout(() => { if (this.state !== 1 && P.engine === "youtube" && P.cur() === s) { P.waiting = true; onPlayback(true) } }, 2500);
       clearInterval(this.timer);
-      this.timer = setInterval(() => { try { setClock(this.player.getCurrentTime(), this.player.getDuration() || 0) } catch {} }, 500);
+      this.timer = setInterval(() => this.tick(), 250);
     },
-    change(st) {
+    tick() {
+      try { const t = this.player.getCurrentTime(), d = this.player.getDuration() || 0; setClock(t, d); this.maybeFade(t, d) } catch {}
+    },
+    maybeFade(t, d) {
+      const len = fadeLen();
+      if (!len || IOS || this.fade || !d || d - t > len || d - t < 0.4 || this.state !== 1) return;
+      const b = 1 - this.a, np = nextPos(), next = np != null && P.list[P.order[np]];
+      if (!next || !next.yt || !this.p[b] || !this.p[b].loadVideoById) return;
+      const out = this.a, pin = this.p[b], pout = this.p[out];
+      pin.setVolume(0); pin.loadVideoById(next.yt); pin.playVideo();
+      this.a = b; P.pos = np; this.state = -1; onPlayback(true);
+      const ms = (d - t) * 1000, t0 = performance.now();
+      this.fade = { out };
+      const step = () => {
+        if (!this.fade) return;
+        const [o, i] = curve(Math.min(1, (performance.now() - t0) / ms));
+        try { pout.setVolume(vol * 100 * o); pin.setVolume(vol * 100 * i) } catch {}
+        if (o > 0.001) this.fade.t = setTimeout(step, 100); else { try { pout.stopVideo() } catch {} this.fade = null }
+      };
+      step();
+    },
+    cancelFade() { if (!this.fade) return; clearTimeout(this.fade.t); try { this.p[this.fade.out].stopVideo() } catch {} this.fade = null; this.setVol(vol) },
+    change(i, st) {
+      if (i !== this.a) return; // the player that's fading out
       this.state = st; if (P.engine !== "youtube") return;
       P.playing = st === 1; if (st === 1) P.waiting = false;
       if (st === 0) advance(1, true); else onPlayback();
     },
     toggle() { if (!this.player) return; if (this.state === 1) this.player.pauseVideo(); else { P.waiting = false; this.player.playVideo() } },
-    stop() { clearInterval(this.timer); clearTimeout(this.kick); try { this.player && this.player.stopVideo() } catch {} hideVideo() },
+    stop() { clearInterval(this.timer); clearTimeout(this.kick); this.cancelFade(); this.p.forEach(x => { try { x && x.stopVideo() } catch {} }); hideVideo() },
     time() { try { return this.player.getCurrentTime() } catch { return 0 } },
     seek0() { try { this.player.seekTo(0, true); this.player.playVideo() } catch {} },
     setVol(v) { try { this.player && this.player.setVolume(v * 100) } catch {} },
@@ -859,17 +936,17 @@
     setVol(v) { clearTimeout(this.volT); this.volT = setTimeout(() => SP.api("/me/player/volume?volume_percent=" + Math.round(v * 100), { method: "PUT" }).catch(() => {}), 250) },
   };
 
-  const ytHost = $("#ytHost");
+  const ytHosts = [$("#ytHost"), $("#ytHost2")];
   function placeVideo() {
     const slot = lcd.querySelector(".lcd-body:not(.out) #npVideo");
     if (P.engine !== "youtube" || !slot) return hideVideo();
     const r = slot.getBoundingClientRect();
-    Object.assign(ytHost.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+    ytHosts.forEach((el, i) => { if (!el) return; if (i === YTP.a) Object.assign(el.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" }); else el.style.left = "-9999px" });
   }
-  function hideVideo() { ytHost.style.left = "-9999px" }
+  function hideVideo() { ytHosts.forEach(el => el && (el.style.left = "-9999px")) }
 
   // ---------- feedback: click sound + haptics ----------
-  const settings = Object.assign({ clicker: true, haptics: true }, store.json("ideradio.settings", {}));
+  const settings = Object.assign({ clicker: true, haptics: true, crossfade: 6 }, store.json("ideradio.settings", {}));
   const saveSettings = () => store.set("ideradio.settings", JSON.stringify(settings));
   let ac = null;
   function click() {
@@ -1097,7 +1174,12 @@
       const hit = bestMatch(song, r);
       if (hit) { song.preview = hit.preview; song.artwork = song.artwork || hit.artwork; song.explicit = song.explicit || hit.explicit; song.links = { ...hit.links, ...song.links } }
       return song;
-    }).catch(() => song));
+    }).catch(() => song).then(async song => {
+      // Some labels block Deezer's clip for a song; Apple usually has one.
+      if (song.preview) return song;
+      try { const a = bestMatch(song, await itunes([(song.artist || "").split(",")[0], song.title].filter(Boolean).join(" "), 5)); if (a && a.preview) { song.preview = a.preview; song.artwork = song.artwork || a.artwork } } catch {}
+      return song;
+    }));
     return pvLook.get(k);
   }
   // Pick the same recording: same title and artist, and no remix / live / cover version unless that's what was asked for.
@@ -1202,7 +1284,7 @@
   }
   function volume(d) {
     vol = Math.max(0, Math.min(1, Math.round((vol + d * 0.05) * 100) / 100));
-    pv.volume = vol; YTP.setVol(vol); if (P.engine === "spotify") SPP.setVol(vol);
+    if (!fade) setDeck(pv, 1); YTP.setVol(vol); if (P.engine === "spotify") SPP.setVol(vol);
     store.set("ideradio.vol", vol); tickFx();
     const v = lcd.querySelector("#vol"); if (!v) return;
     v.classList.add("show"); v.querySelector("i").style.width = vol * 100 + "%";
@@ -1462,6 +1544,8 @@
           ] }) },
         { icon: ["⇄", "#ff8a00"], label: "Shuffle", right: playOpts.shuffle ? "Songs" : "Off", action: () => { setShuffle(!playOpts.shuffle); refresh() } },
         { icon: ["↻", "#ff8a00"], label: "Repeat", right: { off: "Off", one: "One", all: "All" }[playOpts.repeat], action: () => { setRepeat({ off: "all", all: "one", one: "off" }[playOpts.repeat]); refresh() } },
+        { icon: ["≋", "#0fb5a8"], label: "Crossfade", sub: state.service === "spotify" && SP.canPlay() ? "Spotify uses its own setting" : null, right: settings.crossfade ? settings.crossfade + "s" : "Off",
+          action: () => { const opts = [0, 3, 6, 9, 12]; settings.crossfade = opts[(opts.indexOf(settings.crossfade) + 1) % opts.length]; saveSettings(); refresh() } },
         { icon: ["♫", "#0fb5a8"], label: "Clicker", right: settings.clicker ? "On" : "Off", action: () => { settings.clicker = !settings.clicker; saveSettings(); refresh() } },
         { icon: ["≋", "#8a5cff"], label: "Haptics", right: settings.haptics ? "On" : "Off", action: () => { settings.haptics = !settings.haptics; saveSettings(); refresh() } },
         { icon: ["☺", "#ff2e88"], label: "Replay Intro", right: "›", action: () => onboarding() },
@@ -1664,7 +1748,7 @@
     state.busy = true; refresh();
     await Promise.all(songs.map(async s => {
       if ((s.links || {}).apple) return;
-      try { const r = await itunes([s.artist, s.title].filter(Boolean).join(" "), 1); if (r[0]) s.links = { ...(s.links || {}), apple: r[0].links.apple } } catch {}
+      try { const r = await itunes([s.artist, s.title].filter(Boolean).join(" "), 5), a = bestMatch(s, r); if (a) { s.links = { ...(s.links || {}), apple: a.links.apple }; if (!s.preview && a.preview) s.preview = a.preview } } catch {}
     }));
     try {
       const rows = await db.submit(myName || "anon", songs);
