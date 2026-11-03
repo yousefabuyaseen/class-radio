@@ -1166,15 +1166,24 @@
     $("#npNow").textContent = clock(c); $("#npLeft").textContent = "-" + clock(Math.max(0, d - c));
   }
   const SRC = { clip: "Preview", youtube: "YouTube", spotify: "Spotify" };
+  let npShown = null;
   function npView() {
     const it = nowItem();
+    setTimeout(() => { npShown = it }, 0);
     if (!it) return h("div", { class: "txt" }, "Nothing playing. Press ▶❚❚ to play this month's mix.");
     const video = P.engine === "youtube", liked = isLiked(it);
-    const modes = [playOpts.shuffle && P.count() > 1 ? "⇄" : null, playOpts.repeat === "one" ? "↻1" : playOpts.repeat === "all" ? "↻" : null].filter(Boolean).join("  ");
+    const icon = k => { const e = h("span", { class: "mi-svg" }); e.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">' + ICON[k] + "</svg>"; return e };
+    const modes = [
+      tapLabel({ class: "np-mode" + (playOpts.shuffle ? " on" : ""), "aria-label": "Shuffle " + (playOpts.shuffle ? "on" : "off"), "aria-pressed": String(playOpts.shuffle) },
+        () => { click(); setShuffle(!playOpts.shuffle); toast(playOpts.shuffle ? "Shuffle on" : "Shuffle off") }, icon("⇄")),
+      tapLabel({ class: "np-mode" + (playOpts.repeat !== "off" ? " on" : ""), "aria-label": "Repeat " + playOpts.repeat, "aria-pressed": String(playOpts.repeat !== "off") },
+        () => { click(); const r = { off: "all", all: "one", one: "off" }[playOpts.repeat]; setRepeat(r); toast({ off: "Repeat off", all: "Repeat all", one: "Repeat one" }[r]) },
+        icon("↻"), playOpts.repeat === "one" ? h("b", {}, "1") : null),
+    ];
     return h("div", { class: "np" + (video ? " video" : "") },
       h("div", { class: "np-count" }, h("span", {}, P.count() > 1 ? `${P.pos + 1} of ${P.count()}` : ""), h("span", { class: "np-src " + P.engine }, SRC[P.engine]), h("span", { class: "np-modes" }, modes)),
       h("div", { class: "np-mid" },
-        video ? h("div", { class: "np-art np-video", id: "npVideo" }) : h("div", { class: "np-art", style: it.artwork ? `background-image:url("${encodeURI(it.artwork)}")` : null }),
+        video ? h("div", { class: "np-art np-video", id: "npVideo" }) : h("div", { class: "np-art" + (it !== npShown ? " new" : ""), style: it.artwork ? `background-image:url("${encodeURI(it.artwork)}")` : null }),
         h("div", { style: "min-width:0" },
           h("div", { class: "np-t" }, it.explicit ? h("span", { class: "ex" }, "E") : null, it.title),
           h("div", { class: "np-a" }, it.artist || ""),
@@ -1209,7 +1218,7 @@
     return ytOn ? "youtube" : "clip";
   }
   function playFullMix(k, at) {
-    if (P.engine && P.key === "m:" + k && at == null) return stopAll();
+    if (P.engine && P.key === "m:" + k && at == null) { if (!P.playing) toggle(); return openNP() }
     const t = songsFor(k); if (!t.length) return toast("Nothing to play yet", null, "big/hi.png");
     const engine = fullEngine();
     if (engine === "clip") toast("Full songs aren't set up yet, playing 30s previews");
@@ -1229,11 +1238,17 @@
     s.likes = Math.max(0, (s.likes || 0) + (on ? 1 : -1));
     const live = state.songs.get(s.id); if (live && live !== s) live.likes = s.likes;
     if (on) heartBurst();
-    buzz(true); onPlayback(true);
+    buzz(true); paintLike(s);
     try {
       const j = await (await fetch("/api/likes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, id: s.id, like: on }) })).json();
-      if (typeof j.likes === "number") { s.likes = j.likes; if (live) live.likes = j.likes; refresh() }
+      if (typeof j.likes === "number") { s.likes = j.likes; if (live) live.likes = j.likes; paintLike(s); refresh() }
     } catch {}
+  }
+  // Update the ♥ on Now Playing in place, without redrawing (and re-animating) the screen.
+  function paintLike(s) {
+    const el = lcd.querySelector(".lcd-body:not(.out) .np-like");
+    if (el && sameSong(nowItem(), s)) { el.classList.toggle("on", isLiked(s)); el.textContent = (isLiked(s) ? "♥ " : "♡ ") + (s.likes || 0) }
+    else refresh();
   }
   function heartBurst() {
     if (reduce) return;
@@ -1257,8 +1272,8 @@
       myMusicItem(),
       state.crate.length && { icon: ["▤", "#ff8a00"], label: `Your Crate (${state.crate.length})`, right: "›", hot: true, action: () => push(crateScreen()) },
       { icon: ["◷", "#8a5cff"], label: "Archive", right: "›", action: () => push(archiveScreen()) },
-      { icon: ["◉", "#0fb5a8"], label: P.engine && P.key === "m:" + CURRENT ? "Stop Full Mix" : "Play Full Mix", right: P.engine && P.key === "m:" + CURRENT ? "■" : "▶", action: () => playFullMix(CURRENT) },
-      { icon: ["⇄", "#ff8a00"], label: "Shuffle Songs", right: "›", action: () => {
+      { icon: ["◉", "#0fb5a8"], label: "Play Full Mix", right: "▶", action: () => playFullMix(CURRENT) },
+      { icon: ["⇄", "#ff8a00"], label: "Shuffle Full Mix", right: "›", action: () => {
         // Like the iPod: starts the month's mix in shuffled order.
         if (P.engine && P.key === "m:" + CURRENT) { if (!playOpts.shuffle) setShuffle(true); return openNP() }
         playOpts.shuffle = true; savePlay(); playFullMix(CURRENT);

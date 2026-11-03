@@ -11,7 +11,7 @@ Everyone adds 1 to 5 songs a month. The songs build into one mix that plays on a
 ## What it does
 - **The iPod is the interface.** Slide around the click wheel to scroll, tap the top or bottom of the ring to step, press the centre to select, and use menu to go back. On phones, taps on the wheel use the iPhone's haptics.
 - **Monthly mix.** Each person adds up to 5 songs a month. Picks collect in a crate and send themselves a few seconds after the last one (or straight away when the crate is full), and everything lands in one place: This Month, with your picks at the top. Duplicates are blocked, removing a song asks first, and a new mix starts every month.
-- **One Now Playing for everything.** Previews, full songs on YouTube, or your own Spotify all share the same screen, queue, autoplay, Shuffle and Repeat (Settings, or Shuffle Songs on the main menu). Rest on any song in a list to hear it.
+- **One Now Playing for everything.** Previews, full songs on YouTube, or your own Spotify all share the same screen, queue, autoplay, Shuffle and Repeat (Settings, the buttons on Now Playing, or Shuffle Full Mix on the main menu). Rest on any song in a list to hear it.
 - **Likes.** Press the centre button on Now Playing to ♥ a song, iPod-rating style. Counts show quietly next to each pick.
 - **A class playlist on Spotify.** Connect the organiser's Spotify once and the site keeps one shared playlist per month, rebuilt every night, that everyone can follow.
 - **Play Full Mix.** If you listen on Spotify and you're connected, the month's playlist starts on whatever device your Spotify is open on (Premium), or opens in the Spotify app for you to press play. Otherwise full songs play through YouTube right on the iPod screen. Preview Mix plays 30-second clips.
