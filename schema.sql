@@ -13,3 +13,10 @@ CREATE TABLE IF NOT EXISTS songs (
 );
 CREATE INDEX IF NOT EXISTS songs_month ON songs (month, created_at);
 CREATE INDEX IF NOT EXISTS songs_owner ON songs (owner_hash, month);
+
+CREATE TABLE IF NOT EXISTS likes (
+  song_id TEXT NOT NULL,
+  owner_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (song_id, owner_hash)
+);

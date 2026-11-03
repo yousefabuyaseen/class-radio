@@ -1,0 +1,9 @@
+name = "class-radio-nightly"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+SITE = "https://class-radio.pages.dev"   # your site address
+
+[triggers]
+crons = ["55 22 * * *", "55 23 * * *"]

@@ -8,12 +8,34 @@ async function apple(u) {
   const r = await fetch(u.href, { headers: { "user-agent": UA, accept: "text/html" } });
   if (!r.ok) return null;
   const html = await r.text();
+  // Preferred: the page's own data, which lists every track (personal playlists included) with artist and artwork.
+  try {
+    const i = html.indexOf('id="serialized-server-data"');
+    if (i >= 0) {
+      const a = html.indexOf(">", i) + 1, b = html.indexOf("</script>", a);
+      const data = JSON.parse(html.slice(a, b));
+      const sections = (((data.data || [])[0] || {}).data || {}).sections || [];
+      const list = sections.find(x => String(x.id || "").startsWith("track-list"));
+      if (list && list.items && list.items.length) {
+        const head = (sections[0] && sections[0].items && sections[0].items[0]) || {};
+        const songs = list.items.filter(t => t.title && t.contentDescriptor && t.contentDescriptor.kind === "song").map(t => ({
+          title: t.title,
+          artist: (t.subtitleLinks || []).map(x => x.title).filter(Boolean).join(", "),
+          artwork: t.artwork && t.artwork.dictionary && t.artwork.dictionary.url ? t.artwork.dictionary.url.replace("{w}", "300").replace("{h}", "300").replace("{f}", "jpg") : null,
+          explicit: !!t.showExplicitBadge, preview: null,
+          links: t.contentDescriptor.url ? { apple: t.contentDescriptor.url } : {},
+        }));
+        if (songs.length) return { name: head.title || "Playlist", songs };
+      }
+    }
+  } catch {}
+  // Backup: the search-engine summary (first 50 songs, ids only).
   const i = html.indexOf("schema:music-playlist");
   if (i < 0) return null;
   const a = html.indexOf(">", i) + 1, b = html.indexOf("</script>", a);
   const j = JSON.parse(html.slice(a, b));
   const ids = (j.track || []).map(t => (String(t.url || "").match(/\/song\/[^/]+\/(\d+)/) || String(t.url || "").match(/[?&]i=(\d+)/) || [])[1]).filter(Boolean);
-  return { name: j.name || "Playlist", ids };
+  return { name: j.name || "Playlist", ids, country: (u.pathname.match(/^\/([a-z]{2})\//) || [])[1] || "us" };
 }
 
 async function youtube(list, key) {

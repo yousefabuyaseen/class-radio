@@ -11,6 +11,9 @@ Everyone adds 1 to 5 songs a month. The songs build into one mix that plays on a
 ## What it does
 - **The iPod is the interface.** Slide around the click wheel to scroll, tap the top or bottom of the ring to step, press the centre to select, and use menu to go back. On phones, taps on the wheel use the iPhone's haptics.
 - **Monthly mix.** Each person adds up to 5 songs a month. Picks collect in a crate and send themselves a few seconds after the last one (or straight away when the crate is full), and everything lands in one place: This Month, with your picks at the top. Duplicates are blocked, removing a song asks first, and a new mix starts every month.
+- **One Now Playing for everything.** Previews, full songs on YouTube, or your own Spotify all share the same screen, queue, autoplay, Shuffle and Repeat (Settings, or Shuffle Songs on the main menu). Rest on any song in a list to hear it.
+- **Likes.** Press the centre button on Now Playing to ♥ a song, iPod-rating style. Counts show quietly next to each pick.
+- **A class playlist on Spotify.** Connect the organiser's Spotify once and the site keeps one shared playlist per month, rebuilt every night, that everyone can follow.
 - **Play Full Mix.** If you listen on Spotify and you're connected, the month's playlist starts on whatever device your Spotify is open on (Premium), or opens in the Spotify app for you to press play. Otherwise full songs play through YouTube right on the iPod screen. Preview Mix plays 30-second clips.
 - **Search that finds the real versions.** Explicit versions first, with 30-second previews, plus suggestions: For you, Trending, Class faves and a monthly mood.
 - **Your own music.** Connect Spotify to see your liked songs, top songs and playlists. Apple Music users can paste a shared playlist link instead.
@@ -45,6 +48,12 @@ Your site is now at `https://class-radio.pages.dev` (or whatever project name yo
 - **Full songs (Play Full Mix) and YouTube playlist links:** create a YouTube Data API v3 key in Google Cloud, then `wrangler pages secret put YT_KEY --project-name=class-radio`.
 - **Spotify connect, saving and playing:** create an app at developer.spotify.com, add your site URL (with a trailing `/`) as a redirect URI, and put its Client ID in `config.js`. In development mode, add each person's Spotify email under User Management. Starting playback from the site needs Spotify Premium; without it, the mix opens in the Spotify app instead.
 - **YouTube Music connect and saving:** in Google Cloud, set up the Google Auth Platform (External), create a Web OAuth client with your site as an authorized JavaScript origin and your site URL (with a trailing `/`) as an authorized redirect URI, add people as test users, and put the Client ID in `config.js`.
+- **Nightly class playlist:** after Spotify is set up, open Settings → Spotify → Class Playlist on the organiser's account and choose Run It From My Spotify. Then deploy the small nightly job in `cron/` (set `SITE` in `cron/wrangler.toml` to your address) and give it and the site the same secret:
+  ```bash
+  openssl rand -hex 24          # copy the output
+  wrangler pages secret put CRON_KEY --project-name=class-radio
+  cd cron && wrangler deploy && wrangler secret put CRON_KEY
+  ```
 - **Apple Music library connect:** needs a paid Apple Developer membership. Set `APPLE_TEAM_ID`, `APPLE_KEY_ID` and `APPLE_PRIVATE_KEY` (a MusicKit key) as Pages secrets. Without it, Apple Music users can still paste playlist links.
 
 ## Moderation

@@ -18,9 +18,9 @@ const keyOf = s => (s.title + "|" + s.artist).toLowerCase();
 const row = r => ({ ...r, links: JSON.parse(r.links || "{}") });
 
 export async function onRequestGet({ env }) {
-  const { results } = await env.DB.prepare("SELECT * FROM songs ORDER BY created_at").all();
+  const { results } = await env.DB.prepare("SELECT s.*, (SELECT COUNT(*) FROM likes l WHERE l.song_id = s.id) AS likes FROM songs s ORDER BY s.created_at").all();
   const songs = results.map(row);
-  const sig = await sha256(songs.map(s => s.id + s.name).join(","));
+  const sig = await sha256(songs.map(s => s.id + s.name + ":" + s.likes).join(","));
   return json({ songs, sig });
 }
 
