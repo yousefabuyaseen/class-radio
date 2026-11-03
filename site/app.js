@@ -1175,9 +1175,9 @@
     const icon = k => { const e = h("span", { class: "mi-svg" }); e.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">' + ICON[k] + "</svg>"; return e };
     const modes = [
       tapLabel({ class: "np-mode" + (playOpts.shuffle ? " on" : ""), "aria-label": "Shuffle " + (playOpts.shuffle ? "on" : "off"), "aria-pressed": String(playOpts.shuffle) },
-        () => { click(); setShuffle(!playOpts.shuffle); toast(playOpts.shuffle ? "Shuffle on" : "Shuffle off") }, icon("⇄")),
+        () => { click(); setShuffle(!playOpts.shuffle) }, icon("⇄")),
       tapLabel({ class: "np-mode" + (playOpts.repeat !== "off" ? " on" : ""), "aria-label": "Repeat " + playOpts.repeat, "aria-pressed": String(playOpts.repeat !== "off") },
-        () => { click(); const r = { off: "all", all: "one", one: "off" }[playOpts.repeat]; setRepeat(r); toast({ off: "Repeat off", all: "Repeat all", one: "Repeat one" }[r]) },
+        () => { click(); setRepeat({ off: "all", all: "one", one: "off" }[playOpts.repeat]) },
         icon("↻"), playOpts.repeat === "one" ? h("b", {}, "1") : null),
     ];
     return h("div", { class: "np" + (video ? " video" : "") },
