@@ -16,7 +16,7 @@ Everyone adds 1 to 5 songs a month. The songs build into one mix that plays on a
 - **A class playlist on Spotify.** Connect the organiser's Spotify once and the site keeps one shared playlist per month, rebuilt every night, that everyone can follow.
 - **Play Full Mix.** If you listen on Spotify and you're connected, the month's playlist starts on whatever device your Spotify is open on (Premium), or opens in the Spotify app for you to press play. Otherwise full songs play through YouTube right on the iPod screen. Preview Mix plays 30-second clips.
 - **Search that finds the real versions.** Explicit versions first, with 30-second previews, plus suggestions: For you, Trending, Class faves and a monthly mood.
-- **Your own music.** Connect Spotify to see your liked songs, top songs and playlists. Apple Music users can paste a shared playlist link instead.
+- **Your own music.** Connect Spotify to see your liked songs, top songs and playlists. Apple Music users, and Spotify accounts you haven't added to your Spotify app's User Management (Spotify keeps new apps in Development Mode), can paste a shared playlist or album link instead.
 - **Save the mix** to Spotify or YouTube Music as a playlist.
 - **Make it yours.** Choose an iPod classic, mini or nano in white, black, chrome, U2 red or the mini colours. The page follows the device's light or dark mode, and the background takes a soft colour from the screen you're on.
 - **Feels like a device.** Add it to the home screen and it opens full screen with no browser bars, zooming or long-press menus. Your setup (name, iPod, crate, app) is saved, and "Remember me with Face ID" brings it back in the home-screen app or on a new phone.

@@ -185,12 +185,14 @@
     get tok() { return store.json("ideradio.sp", null) },
     set tok(v) { store.set("ideradio.sp", JSON.stringify(v)) },
     connected() { return !!(this.cid && this.tok) },
-    disconnect() { ["ideradio.sp", "ideradio.spme", "ideradio.spcache", "ideradio.sppl"].forEach(k => store.set(k, "null")); this.me = null; this.cache = {}; this.lists = {}; refresh() },
+    // Spotify only lets accounts the owner has added use the app's API. Everyone else picks from playlist links instead.
+    blocked() { return this.connected() && store.get("ideradio.spok") === "0" },
+    disconnect() { ["ideradio.sp", "ideradio.spme", "ideradio.spcache", "ideradio.sppl", "ideradio.spok"].forEach(k => store.set(k, "null")); this.me = null; this.cache = {}; this.lists = {}; refresh() },
     async profile() {
       try {
         const r = await this.api("/me"); if (!r.ok) return null;
-        const j = await r.json(); this.me = { id: j.id, name: j.display_name || j.id }; store.set("ideradio.spme", JSON.stringify(this.me)); refresh(); return this.me;
-      } catch { return null }
+        const j = await r.json(); this.me = { id: j.id, name: j.display_name || j.id }; store.set("ideradio.spme", JSON.stringify(this.me)); store.set("ideradio.spok", "1"); refresh(); return this.me;
+      } catch (e) { if (e && e.message === "forbidden") { store.set("ideradio.spok", "0"); refresh() } return null }
     },
     b64url(buf) { return btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") },
     async login(intent) {
@@ -204,8 +206,8 @@
       }));
     },
     SCOPES: "playlist-modify-private playlist-modify-public playlist-read-private user-library-read user-top-read user-read-recently-played user-modify-playback-state user-read-playback-state",
-    canPlay() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-modify-playback-state")) },
-    canRead() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-library-read")) },
+    canPlay() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-modify-playback-state")) && !this.blocked() },
+    canRead() { const t = this.tok; return !!(t && t.scope && t.scope.includes("user-library-read")) && !this.blocked() },
     async items(path, pick) {
       const r = await this.api(path); if (!r.ok) throw new Error("sp " + r.status);
       return ((await r.json()).items || []).map(pick).filter(t => t && t.name && t.type !== "episode").map(t => ({
@@ -323,7 +325,7 @@
   async function spotifyFail(e) {
     if (e && e.message === "forbidden") {
       const me = await SP.api("/me").catch(x => ({ status: x.message === "forbidden" ? 403 : 0 }));
-      if (me.status === 403) return toast(`Spotify hasn't approved this account for ${NAME} yet. Ask ${OWNER} to add you.`);
+      if (me.status === 403) { store.set("ideradio.spok", "0"); refresh(); return toast("Your Spotify can't save playlists from here. Follow the class playlist instead.") }
     }
     toast("Spotify didn't take that. Try again in a moment.");
   }
@@ -338,7 +340,7 @@
   }
   let resolving = false;
   async function resolveSpotify() {
-    if (resolving || !SP.connected() || state.service !== "spotify") return;
+    if (resolving || !SP.connected() || SP.blocked() || state.service !== "spotify") return;
     resolving = true;
     try { for (const s of songsFor(state.month)) { if (keyOf(s) in SP.cache) continue; await SP.find(s); refresh() } }
     catch {} finally { resolving = false }
@@ -1367,7 +1369,7 @@
     const t = songsFor(k); if (!t.length) return [];
     if (state.service === "spotify" && SP.cid) return [
       STATION.lists[k] && { icon: ["♫", "#1db954"], label: "Class Playlist on Spotify", sub: "updates every night", right: "↗", action: () => window.open(STATION.lists[k].url, "_blank", "noopener") },
-      { icon: ["♫", "#1db954"], label: !SP.connected() ? "Connect Spotify" : SP.lists[k] ? "Update My Copy" : "Save My Own Copy", right: "›", action: () => saveToSpotify(k) },
+      !SP.blocked() && { icon: ["♫", "#1db954"], label: !SP.connected() ? "Connect Spotify" : SP.lists[k] ? "Update My Copy" : "Save My Own Copy", right: "›", action: () => saveToSpotify(k) },
     ];
     if (state.service === "youtube") {
       const ids = t.map(s => s.yt).filter(Boolean).slice(0, 50);
@@ -1621,9 +1623,10 @@
       }),
     };
   }
-  const libErr = e => (e && e.message === "forbidden" ? `Ask ${OWNER} to approve your account` : "Couldn't load. Try again.");
+  const libErr = e => { if (e && e.message === "forbidden") SP.profile(); return "Couldn't load. Go back and try again." };
   function libScreen(k) {
-    if (k === "apple" && !AM.enabled) return linksScreen();
+    if (k === "apple" && !AM.enabled) return linksScreen("apple");
+    if (k === "spotify" && SP.blocked()) return linksScreen("spotify");
     const L = LIB[k];
     const sc = {
       title: L.name, lists: null, err: null,
@@ -1654,7 +1657,7 @@
 
   // ---------- playlists shared by link: Apple Music without an Apple developer key ----------
   const savedLists = () => store.json("ideradio.lists", []);
-  const isListLink = v => { try { const u = new URL(v); return (/music\.apple\.com$/.test(u.hostname) && u.pathname.includes("/playlist/")) || (/youtube\.com$|youtu\.be$/.test(u.hostname) && u.searchParams.has("list")) } catch { return false } };
+  const isListLink = v => { try { const u = new URL(v); return (u.hostname === "spotify.link" || (u.hostname === "open.spotify.com" && /\/(playlist|album)\//.test(u.pathname))) || (/music\.apple\.com$/.test(u.hostname) && u.pathname.includes("/playlist/")) || (/youtube\.com$|youtu\.be$/.test(u.hostname) && u.searchParams.has("list")) } catch { return false } };
   async function readPlaylist(url) {
     const r = await fetch("/api/playlist?url=" + encodeURIComponent(url));
     if (!r.ok) throw new Error("unreadable");
@@ -1672,20 +1675,45 @@
       const m = title.match(/^(.+?)\s+[-–]\s+(.+)$/); if (m) { artist = m[1]; title = m[2] }
       return { title, artist, artwork: x.artwork, preview: null, links: { youtube: "https://music.youtube.com/watch?v=" + x.yt } };
     })(x));
-    const svc = /apple/.test(url) ? "apple" : "youtube";
+    const svc = /spotify/.test(url) ? "spotify" : /apple/.test(url) ? "apple" : "youtube";
+    if (svc === "spotify") fillArt(songs);
     store.set("ideradio.lists", JSON.stringify([{ url, name: j.name, svc, n: songs.length }, ...savedLists().filter(l => l.url !== url)].slice(0, 12)));
     return { name: j.name, songs };
   }
-  function linksScreen() {
+  // Spotify's playlist links don't carry each song's cover, so those are fetched in the background.
+  const artSeen = {};
+  async function fillArt(songs) {
+    const todo = songs.filter(s => !s.artwork && s.links && s.links.spotify);
+    let i = 0, t;
+    const one = async () => {
+      while (i < todo.length) {
+        const s = todo[i++], u = s.links.spotify;
+        try { s.artwork = artSeen[u] = artSeen[u] || (await (await fetch("https://open.spotify.com/oembed?url=" + encodeURIComponent(u))).json()).thumbnail_url || null } catch {}
+        clearTimeout(t); t = setTimeout(refresh, 120);
+      }
+    };
+    await Promise.all([one(), one(), one(), one()]);
+  }
+  const LINKS = {
+    apple: { title: "My Apple Music", icon: ["+", "#fa2d48"], has: l => l.svc !== "spotify",
+      note: "In Music: open a playlist, tap ••• → Share → Copy Link, then paste it here",
+      how: { label: "Share any playlist from the Music app", sub: "Your songs show up here to pick from" } },
+    spotify: { title: "My Spotify", icon: ["+", "#1db954"], has: l => l.svc === "spotify",
+      note: "In Spotify: open a playlist or album, tap ••• → Share → Copy link, then paste it here",
+      how: { label: "Paste a playlist or album", sub: "Liked Songs can't be shared" } },
+  };
+  const SVC_LABEL = { apple: "Apple Music", spotify: "Spotify", youtube: "YouTube" };
+  function linksScreen(svc) {
+    const C = LINKS[svc];
     return {
-      title: "My Apple Music", items: () => {
-        const lists = savedLists();
+      title: C.title, items: () => {
+        const lists = savedLists().filter(C.has);
         return [
-          { icon: ["+", "#fa2d48"], label: "Add a Playlist", right: "›", hot: !lists.length, action: () => push(searchScreen({ title: "Add a Playlist", note: "In Music: open a playlist, tap ••• → Share → Copy Link, then paste it here", placeholder: "Paste a playlist link" })) },
+          { icon: C.icon, label: "Add a Playlist", right: "›", hot: !lists.length, action: () => push(searchScreen({ title: "Add a Playlist", note: C.note, placeholder: "Paste a playlist link" })) },
           lists.length ? { head: true, label: "Your playlists" } : { head: true, label: "How it works" },
           ...(lists.length
-            ? lists.map(l => ({ label: l.name, sub: (l.svc === "apple" ? "Apple Music" : "YouTube") + (l.n ? ` · ${l.n} songs` : ""), right: "›", action: () => push(songsScreen(l.name, () => readPlaylist(l.url).then(x => x.songs))) }))
-            : [{ label: "Share any playlist from the Music app", sub: "Your songs show up here to pick from", dim: true }]),
+            ? lists.map(l => ({ label: l.name, sub: SVC_LABEL[l.svc] + (l.n ? ` · ${l.n} songs` : ""), right: "›", action: () => push(songsScreen(l.name, () => readPlaylist(l.url).then(x => x.songs))) }))
+            : [{ ...C.how, dim: true }]),
         ];
       },
     };
@@ -2026,10 +2054,10 @@
     AM.check().then(() => refresh());
     stationInfo().then(j => { STATION = j; refresh() });
     YT.preload(); // Google's sign-in script has to be ready before the tap, or the popup gets blocked
-    if (SP.connected() && !SP.me) SP.profile();
+    if (SP.connected() && (!SP.me || SP.blocked())) SP.profile(); // also notices when someone gets approved later
     try {
       const intent = await SP.callback();
-      if (intent) { toast("Spotify connected"); state.service = "spotify"; store.set("ideradio.svc", "spotify") }
+      if (intent) { toast(SP.blocked() ? "Spotify connected. Paste a playlist link in My Spotify to pick from it." : "Spotify connected"); state.service = "spotify"; store.set("ideradio.svc", "spotify") }
       await load();
       if (intent && intent.action === "save") saveToSpotify(intent.month || CURRENT);
       if (intent && intent.action === "mine") whenBooted(() => { stack.length = 1; push(libScreen("spotify")) });
