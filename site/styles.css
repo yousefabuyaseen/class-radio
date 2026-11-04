@@ -1,4 +1,4 @@
-/* IDE FM — Frutiger Aero sky, chrome Y2K wordmark, a first-gen iPod with a modern colour screen. UI font: M PLUS Rounded. */
+/* Class Radio — Frutiger Aero sky, chrome Y2K wordmark, a first-gen iPod with a modern colour screen. UI font: M PLUS Rounded. */
 :root {
   --ink: #111;
   --blue: #1f7fe0;
@@ -36,7 +36,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 #fx { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none }
 
 /* ---------- chrome Y2K type ---------- */
-/* "Bjork" (Fontographer, 1998, freeware). Used for the IDE FM wordmark only. */
+/* "Bjork" (Fontographer, 1998, freeware). Used for the Class Radio wordmark only. */
 @font-face { font-family: "Bjork"; src: url("fonts/Bjork.ttf") format("truetype"); font-display: swap }
 .chrome {
   font-family: var(--f-logo); font-weight: 700; letter-spacing: -.01em; text-transform: uppercase;
