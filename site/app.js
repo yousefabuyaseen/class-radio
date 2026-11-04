@@ -68,7 +68,13 @@
   const keyOf = s => ((s.title || "") + "|" + (s.artist || "")).toLowerCase();
   const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  function toast(msg, link, face) { alertBox(msg, link, face) }
+  // Messages work like an iPod's: a few words in the title bar for a moment. A result you can open (a saved playlist)
+  // gets its own small menu screen. The big alert box is only used while the welcome cards cover the iPod.
+  function toast(msg, link, face, ms) {
+    if (document.querySelector(".ob")) return alertBox(msg, link, face);
+    if (link) return push({ title: "Done", items: () => [{ head: true, label: msg }, { label: link.text.replace(/\s*↗$/, ""), right: "↗", hot: true, action: () => window.open(link.href, "_blank", "noopener") }, { label: "Done", right: "›", action: () => pop() }] });
+    flashTitle(msg, ms);
+  }
 
   // ---------- services ----------
   const SERVICES = {
@@ -240,15 +246,15 @@
       history.replaceState(null, "", location.pathname + location.hash);
       let saved; try { saved = JSON.parse(sessionStorage.getItem("ideradio.pkce")) } catch {}
       sessionStorage.removeItem("ideradio.pkce");
-      if (q.has("error") || !saved || saved.st !== q.get("state")) { toast("Spotify not connected"); return null }
+      if (q.has("error") || !saved || saved.st !== q.get("state")) { toast("Spotify didn't connect"); return null }
       // Connecting the class playlist: the server keeps this sign-in, separate from this phone's own.
       if (saved.intent && saved.intent.action === "station") {
         try {
           const j = await (await fetch("/api/station", { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "connect", code: q.get("code"), verifier: saved.verifier, redirect: this.redirect, clientId: this.cid }) })).json();
-          if (j.ok) { STATION = await stationInfo(); setTimeout(() => toast(`Class playlist is on. It updates every night from ${j.user.name}'s Spotify.`, null, "big/good.png"), 1500) }
-          else setTimeout(() => toast(j.error === "not owner" ? "The class playlist is already run from another Spotify account." : "Couldn't connect the class playlist. Try again."), 1500);
-        } catch { setTimeout(() => toast("Couldn't connect the class playlist. Try again."), 1500) }
+          if (j.ok) { STATION = await stationInfo(); setTimeout(() => toast("Class playlist is on ✓"), 1500) }
+          else setTimeout(() => toast(j.error === "not owner" ? "Run by another account" : "Couldn't connect"), 1500);
+        } catch { setTimeout(() => toast("Couldn't connect"), 1500) }
         return null;
       }
       await this.tokenReq({ grant_type: "authorization_code", code: q.get("code"), redirect_uri: this.redirect, code_verifier: saved.verifier });
@@ -325,18 +331,18 @@
   async function spotifyFail(e) {
     if (e && e.message === "forbidden") {
       const me = await SP.api("/me").catch(x => ({ status: x.message === "forbidden" ? 403 : 0 }));
-      if (me.status === 403) { store.set("ideradio.spok", "0"); refresh(); return toast("Your Spotify can't save playlists from here. Follow the class playlist instead.") }
+      if (me.status === 403) { store.set("ideradio.spok", "0"); refresh(); return toast("Can't save from here") }
     }
-    toast("Spotify didn't take that. Try again in a moment.");
+    toast("Couldn't save. Try again");
   }
   async function saveToSpotify(month) {
     if (!SP.connected()) return SP.login({ action: "save", month });
     if (!songsFor(month).length) return toast("Nothing to save yet");
-    toast("Saving to Spotify…");
+    flashTitle("Saving…", 0);
     try {
-      const p = await spotifyPlaylist(month), note = p.miss ? ` (${p.miss} not on Spotify)` : "";
-      toast(`${p.updated ? "Playlist updated" : "Saved"}: ${p.n} songs${note}`, { href: p.url, text: "Open in Spotify ↗" }, "big/good.png");
-    } catch (e) { spotifyFail(e) }
+      const p = await spotifyPlaylist(month), note = p.miss ? ` · ${p.miss} not on Spotify` : "";
+      endFlash(); toast(`${p.updated ? "Updated" : "Saved"} · ${p.n} songs${note}`, { href: p.url, text: "Open in Spotify" });
+    } catch (e) { endFlash(); spotifyFail(e) }
   }
   let resolving = false;
   async function resolveSpotify() {
@@ -434,16 +440,16 @@
   async function saveToYouTube(month) {
     if (!songsFor(month).length) return toast("Nothing to save yet");
     await YT.auth({ action: "ytsave", month });
-    toast("Saving to YouTube…");
+    flashTitle("Saving…", 0);
     await resolveYt(month, true);
     const ids = songsFor(month).map(s => s.yt).filter(Boolean);
-    if (!ids.length) return toast("Couldn't find these songs on YouTube");
+    if (!ids.length) { endFlash(); return toast("Not found on YouTube") }
     try {
       const pl = await YT.post("playlists?part=snippet,status", { snippet: { title: NAME + " · " + monthLabel(month), description: "Made with " + NAME }, status: { privacyStatus: "private" } });
       for (const v of ids) await YT.post("playlistItems?part=snippet", { snippet: { playlistId: pl.id, resourceId: { kind: "youtube#video", videoId: v } } });
       const miss = songsFor(month).length - ids.length;
-      toast(`Saved ${ids.length} songs${miss ? ` (${miss} not found)` : ""}`, { href: "https://music.youtube.com/playlist?list=" + pl.id, text: "Open ↗" });
-    } catch { toast("YouTube save failed. Try again.") }
+      endFlash(); toast(`Saved · ${ids.length} songs${miss ? ` · ${miss} not found` : ""}`, { href: "https://music.youtube.com/playlist?list=" + pl.id, text: "Open in YouTube Music" });
+    } catch { endFlash(); toast("Couldn't save. Try again") }
   }
 
   // ---------- the class Spotify playlist (one shared playlist per month, rebuilt every night on the server) ----------
@@ -462,14 +468,14 @@
           { head: true, label: `From ${STATION.user}'s Spotify · every night` },
           pl && { label: `Open ${monthName(CURRENT)} Playlist`, right: "↗", action: () => window.open(pl.url, "_blank", "noopener") },
           mine && { label: "Update Now", sub: STATION.synced ? "last updated " + new Date(STATION.synced).toLocaleString("en", { weekday: "short", hour: "numeric", minute: "2-digit" }) : null, right: "›", action: async () => {
-            toast("Updating the class playlist…");
+            flashTitle("Updating…", 0);
             try {
               await SP.api("/me"); // refreshes the sign-in if it has expired
               const j = await (await fetch("/api/station", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "sync", access: SP.tok.access }) })).json();
               STATION = await stationInfo(); refresh();
               const m = j.out && j.out[CURRENT];
-              toast(j.ok ? `Class playlist updated: ${m ? m.n : 0} songs` : "Couldn't update it. Try again.", m && m.url ? { href: m.url, text: "Open in Spotify ↗" } : null, j.ok ? "big/good.png" : null);
-            } catch { toast("Couldn't update it. Try again.") }
+              endFlash(); toast(j.ok ? `Updated · ${m ? m.n : 0} songs` : "Couldn't update. Try again", j.ok && m && m.url ? { href: m.url, text: "Open in Spotify" } : null);
+            } catch { endFlash(); toast("Couldn't update. Try again") }
           } },
         ];
       },
@@ -522,8 +528,8 @@
         attributes: { name: NAME + " · " + monthLabel(month), description: "Made with " + NAME },
         relationships: { tracks: { data: ids.map(id => ({ id, type: "songs" })) } },
       }) } });
-      toast(`Saved ${ids.length} songs to your Apple Music library`);
-    } catch { toast("Apple Music save failed. Try again.") }
+      toast(`Saved ${ids.length} songs ✓`);
+    } catch { toast("Couldn't save. Try again") }
   }
 
   function linkFor(s) {
@@ -703,7 +709,7 @@
     if (P.engine === "clip") {
       ensurePreview(s).then(() => {
         if (P.cur() !== s || P.engine !== "clip") return;
-        if (!s.preview) return P.count() > 1 ? advance(1, true) : (toast("No preview for this one"), stopAll());
+        if (!s.preview) return P.count() > 1 ? advance(1, true) : (toast("No preview"), stopAll());
         if (ac && ac.state !== "running") ac.resume().catch(() => {});
         setDeck(pv, 1); pv.src = s.preview; pv.currentTime = 0;
         pv.play().catch(() => { P.waiting = true; onPlayback(true) });
@@ -742,9 +748,9 @@
     else if (P.engine === "spotify") SPP.toggle();
   }
   // Switch a running queue to another engine (e.g. Spotify isn't open anywhere, so play here instead).
-  function switchEngine(engine, why) {
+  function switchEngine(engine) {
     if (!P.engine) return;
-    engineStop(); P.engine = engine; if (why) toast(why); engineStart();
+    engineStop(); P.engine = engine; engineStart();
   }
   function setShuffle(on) {
     playOpts.shuffle = on; savePlay();
@@ -759,7 +765,7 @@
   function setRepeat(r) { playOpts.repeat = r; savePlay(); if (P.engine === "spotify") SPP.repeat(); onPlayback(true) }
 
   decks.forEach(a => {
-    a.addEventListener("play", () => { if (a === pv && P.engine === "clip") { P.playing = true; P.waiting = false; onPlayback() } });
+    a.addEventListener("play", () => { if (a === pv && P.engine === "clip") { const hint = P.waiting; P.playing = true; P.waiting = false; onPlayback(hint) } }); // clears "Press ▶❚❚ to start"
     a.addEventListener("pause", () => { if (a === pv && P.engine === "clip" && !a.ended) { P.playing = false; onPlayback() } });
     a.addEventListener("ended", () => { if (a === pv && P.engine === "clip") advance(1, true) });
     a.addEventListener("timeupdate", () => { if (a === pv && P.engine === "clip") { setClock(a.currentTime, a.duration || 30); maybeCrossfade() } });
@@ -841,7 +847,7 @@
       if (!s.yt && s.id) await findYtFor(s);
       if (P.cur() !== s || P.engine !== "youtube") return;
       if (!s.yt) return advance(1, true);
-      if (!(await this.create())) return switchEngine("clip", "The YouTube player didn't load, playing 30s previews");
+      if (!(await this.create())) return switchEngine("clip");
       if (P.cur() !== s) return;
       this.player.setVolume(vol * 100); this.player.loadVideoById(s.yt); this.player.playVideo();
       if (!IOS) this.create(1 - this.a); // get the other player ready for the crossfade
@@ -876,8 +882,9 @@
     change(i, st) {
       if (i !== this.a) return; // the player that's fading out
       this.state = st; if (P.engine !== "youtube") return;
+      const hint = P.waiting && st === 1;
       P.playing = st === 1; if (st === 1) P.waiting = false;
-      if (st === 0) advance(1, true); else onPlayback();
+      if (st === 0) advance(1, true); else onPlayback(hint);
     },
     toggle() { if (!this.player) return; if (this.state === 1) this.player.pauseVideo(); else { P.waiting = false; this.player.playVideo() } },
     stop() { clearInterval(this.timer); clearTimeout(this.kick); this.cancelFade(); this.p.forEach(x => { try { x && x.stopVideo() } catch {} }); hideVideo() },
@@ -901,16 +908,15 @@
       if (P.engine !== "spotify") return;
       this.map = []; this.uris = [];
       found.forEach((f, k) => { if (f) { this.map.push(k); this.uris.push(f.uri) } });
-      if (!this.uris.length) return switchEngine(ytOn ? "youtube" : "clip", "These songs aren't on Spotify, playing here instead");
+      if (!this.uris.length) return switchEngine(ytOn ? "youtube" : "clip");
       const offset = Math.max(0, this.map.findIndex(k => k >= P.pos));
       const body = { uris: this.uris, offset: { position: offset } };
       if (keepPlace && this.progress) body.position_ms = Math.floor(this.progress * 1000);
       let r;
       try { r = await SP.api("/me/player/play", { method: "PUT", body: JSON.stringify(body) }) } catch (e) { r = { status: e.message === "forbidden" ? 403 : 0 } }
       if (P.engine !== "spotify") return;
-      if (r.status === 404) return switchEngine(ytOn ? "youtube" : "clip", "Open Spotify on any device to play there. Playing here for now.");
-      if (r.status === 403) return switchEngine(ytOn ? "youtube" : "clip", "Playing through Spotify needs Premium. Playing here instead.");
-      if (!(r.status >= 200 && r.status < 300)) return switchEngine(ytOn ? "youtube" : "clip", "Spotify didn't start. Playing here instead.");
+      // No Spotify open anywhere (404), no Premium (403) or anything else: play here instead. The badge shows where.
+      if (!(r.status >= 200 && r.status < 300)) return switchEngine(ytOn ? "youtube" : "clip");
       await SP.api("/me/player/shuffle?state=false", { method: "PUT" }).catch(() => {}); // we shuffle the queue ourselves
       this.repeat();
       clearInterval(this.poll); this.poll = setInterval(() => this.sync(), 1500); setTimeout(() => this.sync(), 600);
@@ -928,7 +934,7 @@
         else if (was !== P.playing) onPlayback();
         setClock(this.progress, (j.item && j.item.duration_ms || 0) / 1000);
         // Spotify played past our queue (or switched to something else): we're done.
-        if (uri && idx < 0 && this.lastUri && this.uris.includes(this.lastUri)) { clearInterval(this.poll); Object.assign(P, { engine: null, list: [], order: [] }); onPlayback(true) }
+        if (uri && idx < 0 && this.lastUri && this.uris.includes(this.lastUri)) { clearInterval(this.poll); Object.assign(P, { engine: null, list: [], order: [], pos: 0, key: null, playing: false }); onPlayback(true) }
         this.lastUri = uri;
       } catch {}
     },
@@ -1020,10 +1026,20 @@
   const itemsOf = s => (typeof s.items === "function" ? s.items() : s.items || []).filter(Boolean);
   const titleOf = s => (typeof s.title === "function" ? s.title() : s.title);
 
+  let flash = null, flashT;
+  function flashTitle(msg, ms = 2200) {
+    flash = msg; clearTimeout(flashT);
+    paintTitle();
+    if (ms) flashT = setTimeout(() => { flash = null; paintTitle() }, ms);
+  }
+  const endFlash = () => { clearTimeout(flashT); flash = null; paintTitle() };
+  function paintTitle() {
+    for (const t of lcd.querySelectorAll(".lcd-title .tt")) { t.textContent = flash || titleOf(cur()); t.classList.toggle("flash", !!flash) }
+  }
   function titleBar() {
     return h("div", { class: "lcd-title" },
       h("span", { class: "st" }, isAnyPlaying() ? "▶" : nowItem() ? "❚❚" : ""),
-      h("span", {}, titleOf(cur())),
+      h("span", { class: "tt" + (flash ? " flash" : "") }, flash || titleOf(cur())),
       h("span", { class: "bat" }, h("i")),
       state.crate.length ? h("span", { class: "crate-n", "aria-label": state.crate.length + " in crate" }, state.crate.length) : null);
   }
@@ -1168,21 +1184,25 @@
   }
   // Instagram-style: rest on a song for a moment and it starts playing.
   // Songs from Spotify / YouTube / Apple links have no clip of their own: borrow one from search, once per song.
+  // The clip found for a song is remembered by title + artist, not on one copy of the song: the song list reloads
+  // every so often with fresh copies, and a clip stuck to an old copy was lost (that's why Mimesis went quiet again).
   const pvLook = new Map();
+  const pvApply = (song, x) => { if (x && x.preview && !song.preview) { song.preview = x.preview; song.artwork = song.artwork || x.artwork; song.explicit = song.explicit || x.explicit } return song };
   function ensurePreview(song) {
     if (song.preview) return Promise.resolve(song);
-    const k = keyOf(song);
-    if (!pvLook.has(k)) pvLook.set(k, search([(song.artist || "").split(",")[0], song.title].filter(Boolean).join(" "), 3).then(r => {
-      const hit = bestMatch(song, r);
-      if (hit) { song.preview = hit.preview; song.artwork = song.artwork || hit.artwork; song.explicit = song.explicit || hit.explicit; song.links = { ...hit.links, ...song.links } }
-      return song;
-    }).catch(() => song).then(async song => {
-      // Some labels block Deezer's clip for a song; Apple usually has one.
-      if (song.preview) return song;
-      try { const a = bestMatch(song, await itunes([(song.artist || "").split(",")[0], song.title].filter(Boolean).join(" "), 5)); if (a && a.preview) { song.preview = a.preview; song.artwork = song.artwork || a.artwork } } catch {}
-      return song;
-    }));
-    return pvLook.get(k);
+    const k = keyOf(song), q = [(song.artist || "").split(",")[0], song.title].filter(Boolean).join(" ");
+    let job = pvLook.get(k);
+    if (!job || (job.done && !job.hit && Date.now() - job.at > 60000)) { // a failed lookup is tried again a minute later
+      job = { at: Date.now(), done: false, hit: null };
+      job.p = (async () => {
+        try { const d = bestMatch(song, await search(q, 3)); if (d && d.preview) return d } catch {}
+        // Some labels block Deezer's clip for a song; Apple usually has one.
+        try { const a = bestMatch(song, await itunes(q, 5)); if (a && a.preview) return a } catch {}
+        return null;
+      })().then(x => { job.hit = x; job.done = true; return x });
+      pvLook.set(k, job);
+    }
+    return job.p.then(x => pvApply(song, x));
   }
   // Pick the same recording: same title and artist, and no remix / live / cover version unless that's what was asked for.
   const norm = t => (t || "").toLowerCase().replace(/\s*[\(\[][^\)\]]*[\)\]]/g, "").replace(/\s+-\s+.*$/, "").replace(/[^a-z0-9\u00c0-\uffff]+/g, " ").trim();
@@ -1198,7 +1218,7 @@
       if (x.preview) sc += 1;
       if (sc > top) { top = sc; best = x }
     }
-    return best;
+    return top >= 4 ? best : null; // at least the same title, or a close title by the same artist
   }
   // Keep the next few clips loading in the background so a resting finger starts music almost at once.
   const warm = new Map();
@@ -1272,7 +1292,7 @@
           h("div", { class: "np-t" }, it.explicit ? h("span", { class: "ex" }, "E") : null, it.title),
           h("div", { class: "np-a" }, it.artist || ""),
           it.name ? h("div", { class: "np-by" }, "picked by " + it.name) : null,
-          it.id ? h("div", { class: "np-like" + (liked ? " on" : "") }, (liked ? "♥ " : "♡ ") + (it.likes || 0)) : null)),
+          it.id ? h("div", { class: "np-like" + (liked ? " on" : "") }, (liked ? "♥ " : "♡ ") + likesOf(it)) : null)),
       P.waiting ? h("div", { class: "np-hint" }, "Press ▶❚❚ to start") : null,
       h("div", {}, h("div", { class: "np-bar" }, h("i", { id: "npBar" })), h("div", { class: "np-time" }, h("span", { id: "npNow" }, "0:00"), h("span", { id: "npLeft" }, "-0:00"))),
       h("div", { class: "vol", id: "vol" }, "−", h("div", { class: "np-bar" }, h("i", { style: `width:${vol * 100}%` })), "+"));
@@ -1293,19 +1313,14 @@
     clearTimeout(volT); volT = setTimeout(() => v.classList.remove("show"), 1400);
   }
   // Which engine plays full songs for this listener.
-  let warnedSpotify = false;
   function fullEngine() {
-    if (state.service === "spotify" && SP.connected()) {
-      if (SP.canPlay()) return "spotify";
-      if (!warnedSpotify) { warnedSpotify = true; setTimeout(() => toast("To play through your Spotify app, reconnect Spotify once in Settings. Playing here for now."), 900) }
-    }
+    if (state.service === "spotify" && SP.canPlay()) return "spotify";
     return ytOn ? "youtube" : "clip";
   }
   function playFullMix(k, at) {
     if (P.engine && P.key === "m:" + k && at == null) { if (!P.playing) toggle(); return openNP() }
-    const t = songsFor(k); if (!t.length) return toast("Nothing to play yet", null, "big/hi.png");
+    const t = songsFor(k); if (!t.length) return toast("Nothing to play yet");
     const engine = fullEngine();
-    if (engine === "clip") toast("Full songs aren't set up yet, playing 30s previews");
     playList(t, { engine, key: "m:" + k, at }); openNP();
   }
   function startMix(k = CURRENT) { playList(songsFor(k), { engine: "clip", key: "c:" + k }); openNP() }
@@ -1315,6 +1330,8 @@
   // ---------- likes: ♥ a song with the centre button on Now Playing, or from the song's screen ----------
   const liked = new Set(store.json("ideradio.liked", []));
   const isLiked = s => !!s && !!s.id && liked.has(s.id);
+  // The song list reloads with fresh copies, so the count is read from the newest copy.
+  const likesOf = s => ((s.id && state.songs.get(s.id)) || s).likes || 0;
   async function toggleLike(s) {
     if (!s || !s.id) return;
     const on = !liked.has(s.id);
@@ -1331,7 +1348,7 @@
   // Update the ♥ on Now Playing in place, without redrawing (and re-animating) the screen.
   function paintLike(s) {
     const el = lcd.querySelector(".lcd-body:not(.out) .np-like");
-    if (el && sameSong(nowItem(), s)) { el.classList.toggle("on", isLiked(s)); el.textContent = (isLiked(s) ? "♥ " : "♡ ") + (s.likes || 0) }
+    if (el && sameSong(nowItem(), s)) { el.classList.toggle("on", isLiked(s)); el.textContent = (isLiked(s) ? "♥ " : "♡ ") + likesOf(s) }
     else refresh();
   }
   function heartBurst() {
@@ -1541,8 +1558,8 @@
         PK.ok && { icon: ["☺", "#2f7ff0"], label: "Remember Me", sub: PK.saved() ? `saved with ${PK_NAME}` : `save your setup with ${PK_NAME}`, right: PK.saved() ? "✓" : "›",
           action: () => push({ title: "Remember Me", items: () => [
             { head: true, label: "Name, iPod, crate and app choice" },
-            { label: PK.saved() ? "Save Again" : `Save with ${PK_NAME}`, right: "›", action: async () => { try { await PK.save(); toast("Saved", null, "big/good.png"); refresh() } catch {} } },
-            { label: `Restore with ${PK_NAME}`, right: "›", action: async () => { try { await PK.restore() } catch { toast(`No saved setup found with ${PK_NAME}`) } } },
+            { label: PK.saved() ? "Save Again" : `Save with ${PK_NAME}`, right: "›", action: async () => { try { await PK.save(); toast("Saved ✓"); refresh() } catch {} } },
+            { label: `Restore with ${PK_NAME}`, right: "›", action: async () => { try { await PK.restore() } catch { toast("Nothing saved yet") } } },
           ] }) },
         { icon: ["⇄", "#ff8a00"], label: "Shuffle", right: playOpts.shuffle ? "Songs" : "Off", action: () => { setShuffle(!playOpts.shuffle); refresh() } },
         { icon: ["↻", "#ff8a00"], label: "Repeat", right: { off: "Off", one: "One", all: "All" }[playOpts.repeat], action: () => { setRepeat({ off: "all", all: "one", one: "off" }[playOpts.repeat]); refresh() } },
@@ -1561,9 +1578,9 @@
         { head: true, label: SP.me && SP.me.name ? "Signed in as " + SP.me.name : "Connected" },
         { label: "My Spotify", right: "›", action: () => push(libScreen("spotify")) },
         (!STATION.connected || (SP.me && STATION.userId === SP.me.id)) && { label: "Class Playlist", sub: STATION.connected ? "on · updates every night" : "set up the shared playlist", right: "›", action: () => push(stationScreen()) },
-        { label: "Save This Month", right: "›", action: () => saveToSpotify(CURRENT) },
+        !SP.blocked() && { label: "Save This Month", right: "›", action: () => saveToSpotify(CURRENT) },
         SP.lists[CURRENT] && { label: "Open Playlist", right: "↗", action: () => window.open(SP.lists[CURRENT].url, "_blank", "noopener") },
-        { label: "Disconnect", right: "×", action: () => { SP.disconnect(); pop(); toast("Spotify disconnected") } },
+        { label: "Disconnect", right: "×", action: () => { SP.disconnect(); pop() } },
       ],
     };
   }
@@ -1578,7 +1595,7 @@
     };
   }
   function disconnectScreen(name, fn) {
-    return { title: name, items: () => [{ head: true, label: "Connected" }, { label: "Disconnect", right: "×", action: () => { fn(); pop(); toast(name + " disconnected") } }] };
+    return { title: name, items: () => [{ head: true, label: "Connected" }, { label: "Disconnect", right: "×", action: () => { fn(); pop() } }] };
   }
   function listenScreen() {
     return {
@@ -1604,8 +1621,8 @@
   const libsAvail = () => Object.keys(LIB).filter(k => LIB[k].avail());
   const libsOn = () => libsAvail().filter(k => LIB[k].on());
   async function connectLib(k) {
-    try { await LIB[k].connect(); if (LIB[k].on()) { toast(LIB[k].svc + " connected", null, "big/good.png"); refresh() } }
-    catch { toast(LIB[k].svc + " didn't connect. Try again.") }
+    try { await LIB[k].connect(); if (LIB[k].on()) refresh() }
+    catch { toast("Didn't connect. Try again") }
   }
   // The menu entry is named after whatever you've connected: one service gets its own name, two or more is "My Music".
   function myMusicItem() {
@@ -1760,12 +1777,11 @@
     const i = state.crate.findIndex(c => keyOf(c) === keyOf(s));
     if (i >= 0) return removeFromCrate(s);
     else {
-      if (mine().length >= MAX) return toast("You've added all 5 this month");
-      if (!slotsLeft()) return toast("Crate's full. Remove one to swap");
+      if (mine().length >= MAX) return toast("All 5 added this month");
+      if (!slotsLeft()) return toast("Crate's full");
       if (songsFor(CURRENT).some(c => keyOf(c) === keyOf(s))) return toast("Already in the mix");
       state.crate.push({ title: s.title, artist: s.artist || "", artwork: s.artwork || null, preview: s.preview || null, links: s.links || {} });
       lcd.animate([{ filter: "brightness(1.12)" }, { filter: "none" }], { duration: 260 });
-      if (!slotsLeft()) alertBox("Crate's full. Sending now…");
     }
     saveCrate(); armSend(); refresh();
   }
@@ -1786,18 +1802,18 @@
       const n = state.crate.length; state.crate = []; saveCrate(); state.busy = false;
       if (P.key && P.key.startsWith("p:")) stopAll();
       stack.length = 1; push(monthScreen(CURRENT));
-      buzz(true); toast(`Sent! ${n === 1 ? "Your song is" : `Your ${n} songs are`} in the ${monthName(CURRENT)} mix`, null, "big/congratulate.png");
+      buzz(true); toast(n === 1 ? "Sent ✓" : `Sent ${n} songs ✓`, null, null, 2600);
     } catch (e) {
       state.busy = false;
       const m = String((e && e.message) || "");
-      if (m === "dupe") { state.crate = state.crate.filter(s => s.title !== e.title); saveCrate(); toast(`"${e.title}" was just added by someone else`) }
-      else toast(m === "limit" ? `Only ${MAX - mine().length} slots left` : m === "closed" ? "This month is closed" : "Couldn't submit. Try again.");
+      if (m === "dupe") { state.crate = state.crate.filter(s => s.title !== e.title); saveCrate(); toast("Someone just added that") }
+      else toast(m === "limit" ? `Only ${MAX - mine().length} left` : m === "closed" ? "This month is closed" : "Couldn't send. Try again");
       refresh();
     }
   }
   async function removeSong(s) {
     state.songs.delete(s.id); refresh();
-    try { await db.remove(s.id, s.month) } catch { state.songs.set(s.id, s); refresh(); toast("Couldn't remove. Try again.") }
+    try { await db.remove(s.id, s.month) } catch { state.songs.set(s.id, s); refresh(); toast("Couldn't remove. Try again") }
   }
 
   // ---------- the click wheel ----------
@@ -2042,7 +2058,6 @@
     if (!(await pullPrefs())) return;
     const ytIntent = YT.callback();
     if (ytIntent) {
-      toast("YouTube Music connected", null, "big/good.png");
       if (ytIntent.action === "ytsave") setTimeout(() => saveToYouTube(ytIntent.month || CURRENT), 1500);
       if (ytIntent.action === "ytmine") whenBooted(() => { stack.length = 1; push(libScreen("youtube")) });
     }
@@ -2057,7 +2072,7 @@
     if (SP.connected() && (!SP.me || SP.blocked())) SP.profile(); // also notices when someone gets approved later
     try {
       const intent = await SP.callback();
-      if (intent) { toast(SP.blocked() ? "Spotify connected. Paste a playlist link in My Spotify to pick from it." : "Spotify connected"); state.service = "spotify"; store.set("ideradio.svc", "spotify") }
+      if (intent) { state.service = "spotify"; store.set("ideradio.svc", "spotify") }
       await load();
       if (intent && intent.action === "save") saveToSpotify(intent.month || CURRENT);
       if (intent && intent.action === "mine") whenBooted(() => { stack.length = 1; push(libScreen("spotify")) });
